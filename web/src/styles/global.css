@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Poppins', system-ui, sans-serif;
+  background: radial-gradient(ellipse at top, #1A1B2E 0%, #0F1020 50%, #0a0b16 100%);
+  background-attachment: fixed;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 毛玻璃面板通用样式 */
+.glass {
+  background: rgba(26, 27, 46, 0.55);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-strong {
+  background: rgba(22, 23, 43, 0.75);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* 品牌渐变文字 */
+.gradient-text {
+  background: linear-gradient(135deg, #FF8C42 0%, #FFA559 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  padding-bottom: 0.15em;
+  line-height: 1.2;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 140, 66, 0.3);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 140, 66, 0.5);
+}
+
+/* 按钮交互 */
+.btn-brand {
+  background: linear-gradient(135deg, #FF6B35 0%, #FF8C42 100%);
+  transition: all 0.25s ease;
+}
+.btn-brand:hover {
+  box-shadow: 0 8px 30px rgba(255, 140, 66, 0.45);
+  transform: translateY(-1px);
+}
+.btn-brand:active {
+  transform: translateY(0);
+}
+
+/* Agora SDK 播放器：强制视频填满容器，完整显示内容 */
+#agora-player video,
+.agora_video_player {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}

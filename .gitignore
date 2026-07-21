@@ -1,0 +1,26 @@
+# Dependencies
+node_modules
+
+# Environment secrets
+.env
+
+# Database files (contains sensitive credentials)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Internal development docs (not for public repo)
+memory.md
+plans/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+{
+  "name": "xgoatcast",
+  "version": "0.0.1",
+  "description": "小羊屏幕共享 - 基于 Agora 与 KOOK 的屏幕共享机器人",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build:web": "npm run build --workspace web",
+    "build:server": "npm run build --workspace server",
+    "build": "npm run build:web && npm run build:server",
+    "start": "npm run start:prod --workspace server"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
