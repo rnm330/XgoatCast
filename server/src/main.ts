@@ -97,11 +97,6 @@ async function bootstrap() {
     }
     const path = req.path;
 
-    // Skip CSRF for endpoints called from KOOK (use one-time token instead)
-    if (path === '/api/share/reshare-confirm') {
-      return next();
-    }
-
     // Skip CSRF for public share endpoints (already have token guard)
     if (path.startsWith('/api/share/')) {
       return next();
