@@ -1,21 +1,21 @@
-# 领域术语表
+# Domain glossary
 
-## 触发词标签
+## Trigger word label
 
-由超级管理员维护的短语。当 KOOK 消息中出现该短语时，可以发起屏幕共享会话。全局触发词标签库是所有可用标签的唯一权威来源。
+A phrase managed by the super administrator that can start a screen-sharing session when it appears in a KOOK message. The global trigger word library is the authoritative set of available labels.
 
-## 已启用触发词
+## Enabled trigger word
 
-某个 KOOK 服务器的管理员从全局标签库中选择并启用的触发词。服务器只能启用当前仍存在于全局标签库中的标签。
+A trigger word label selected by a server administrator for one KOOK server. A server can only enable labels that currently exist in the global trigger word library.
 
-## 发起共享卡片
+## Start-sharing card
 
-仅屏幕共享发起人可见的 KOOK 临时卡片，其中包含发布端链接，不作为该会话的频道公开记录。
+A temporary KOOK card visible only to the person who requested a screen share. It contains the publisher link and is not the public record of the session.
 
-## 观看卡片
+## Viewing card
 
-一个屏幕共享会话在频道内唯一的公开卡片。只有发布端真正开始共享后才创建；在同一会话的整个生命周期内复用，包括发布端短暂断开后恢复的情况。
+The single public KOOK card for a screen-sharing session. It is created only after publishing actually starts and is reused for the lifetime of that session, including brief publisher disconnects and resumes.
 
-## 删除服务器
+## Server deletion
 
-永久删除服务器注册信息，包括绑定凭证、配置、事件历史和会话。机器人再次发现该 KOOK 服务器时，会将其注册为新的未绑定服务器，服务器主必须重新完成绑定。
+The permanent removal of a server registration, including its binding credentials, configuration, event history, and sessions. If the bot discovers the KOOK server again, it is registered as a new unbound server and the owner must bind it again.
