@@ -36,7 +36,7 @@ export class ServerAdminController {
 
     // 校验绑定 token（未绑定时必须提供有效 token）
     if (!dto.token || !this.db.validateBindToken(serverId, dto.token)) {
-      return { ok: false, message: '绑定链接无效或已过期，请在 KOOK 服务器内重新发送 /xc绑定 命令' };
+      return { ok: false, message: '绑定链接无效或已过期，请在 KOOK 服务器内重新发送 /xchelp 命令' };
     }
 
     const passwordHash = bcrypt.hashSync(dto.password, 10);

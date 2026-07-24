@@ -21,7 +21,6 @@ vim .env
 |------|------|
 | `SUPER_ADMIN_PASSWORD` | **必填**，超级管理员登录密码 |
 | `PORT` | 服务端口，默认 3520 |
-| `PUBLIC_DOMAIN` | 对外可访问域名（如 `https://share.example.com`） |
 
 > Agora 凭证和 KOOK Bot Token 不在环境变量配置——机器人加入服务器后，由频道主在管理面板中为每个服务器独立配置。
 

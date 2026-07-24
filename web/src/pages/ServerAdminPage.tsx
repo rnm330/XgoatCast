@@ -163,7 +163,7 @@ function BindTokenRequired({ guildName }: { guildName: string }) {
           该服务器的管理面板尚未绑定。请在 KOOK 服务器内发送以下命令获取绑定链接：
         </p>
         <div className="bg-white/5 border border-white/10 rounded-lg px-4 py-3 mb-4">
-          <code className="text-brand-light text-sm font-mono">/xc绑定</code>
+          <code className="text-brand-light text-sm font-mono">/xchelp</code>
         </div>
         <p className="text-xs text-dim">
           仅服务器主可执行此命令，绑定链接 10 分钟内有效

@@ -89,31 +89,6 @@ async function bootstrap() {
     next();
   });
 
-  // ===== CSRF middleware (POST endpoints) =====
-  const publicDomain = (process.env.PUBLIC_DOMAIN || '').replace(/\/+$/, '');
-  app.use((req: any, res: any, next: any) => {
-    if (req.method !== 'POST' && req.method !== 'PUT' && req.method !== 'DELETE') {
-      return next();
-    }
-    const path = req.path;
-
-    // Skip CSRF for public share endpoints (already have token guard)
-    if (path.startsWith('/api/share/')) {
-      return next();
-    }
-
-    // Admin endpoints: verify Origin/Referer or require SameSite cookie
-    if (path.startsWith('/api/super') || path.startsWith('/api/server')) {
-      const origin = req.headers.origin || req.headers.referer || '';
-      // Only check if publicDomain is configured (skip in dev with localhost)
-      if (publicDomain && !origin.startsWith(publicDomain) && !origin.includes('localhost')) {
-        return res.status(403).json({ message: '跨站请求被拒绝' });
-      }
-    }
-
-    next();
-  });
-
   // ===== Auth middleware =====
   // Protects /api/super/* and /api/server/* endpoints.
   // Public exceptions: /api/super/login, /api/server/:id/login|status|bind
