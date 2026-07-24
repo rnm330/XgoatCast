@@ -24,30 +24,47 @@ vim .env
 
 > Agora 凭证和 KOOK Bot Token 不在环境变量配置——机器人加入服务器后，由频道主在管理面板中为每个服务器独立配置。
 
-### 2. 构建并启动
+### 2. 本地构建 dist
 
 ```bash
-# 构建前端 + 后端
 npm run build
+```
 
-# 启动 Docker 容器
+将以下文件上传到服务器（不需要上传源码或 `node_modules`）：
+
+- `server/dist/`
+- `web/dist/`
+- `Dockerfile`
+- `docker-compose.yml`
+- `package.json`
+- `package-lock.json`
+- `server/package.json`
+- `web/package.json`
+
+### 3. 在线构建运行镜像并启动
+
+```bash
+# 在服务器的部署目录执行
 docker compose up -d --build
 ```
 
-### 3. 配置超管面板
+Docker 在线构建阶段只会安装服务端生产依赖，并把已上传的两个 `dist`
+目录装入运行镜像；不会再次编译前端或 TypeScript，也不依赖服务器上已有的旧镜像。
+
+### 4. 配置超管面板
 
 1. 访问 `http://你的域名:3520/super`
 2. 使用 `SUPER_ADMIN_PASSWORD` 登录
 3. 在「全局配置」中填入 KOOK Bot Token 和公网域名
 4. 邀请机器人到 KOOK 服务器，机器人会自动同步服务器列表
 
-### 4. 服务器绑定（频道主操作）
+### 5. 服务器绑定（频道主操作）
 
 1. 机器人加入后自动向频道主发送绑定卡片
 2. 若未收到，频道主在 KOOK 频道发送 `/xchelp` 调起绑定
 3. 点击绑定卡片 → 设置管理密码 → 配置 Agora App ID 和 App Certificate
 
-### 5. 开始使用
+### 6. 开始使用
 
 频道内发送触发词（默认「屏幕共享」）→ 机器人推送卡片 → 点击开始共享。
 

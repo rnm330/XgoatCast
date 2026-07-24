@@ -46,9 +46,9 @@ export default function SharePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [lowLatency, setLowLatency] = useState(false);
-  const [qualityIdx, setQualityIdx] = useState(2);
+  const [qualityIdx, setQualityIdx] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
-  const [allowedQualities, setAllowedQualities] = useState<string[]>(QUALITY_OPTIONS.map((q) => q.key));
+  const [allowedQualities, setAllowedQualities] = useState<string[]>([]);
   const [shareError, setShareError] = useState('');
   const [idleCountdown, setIdleCountdown] = useState<number | null>(null);
   const [noViewerCountdown, setNoViewerCountdown] = useState<number | null>(null);
@@ -67,11 +67,9 @@ export default function SharePage() {
     api.getShareInfo(token)
       .then((data) => {
         setInfo(data);
-        if (data.allowedQualities?.length) {
-          setAllowedQualities(data.allowedQualities);
-          const idx = QUALITY_OPTIONS.findIndex((q) => q.key === data.allowedQualities![0]);
-          if (idx >= 0) setQualityIdx(idx);
-        }
+        const allowed = QUALITY_OPTIONS.filter((q) => data.allowedQualities?.includes(q.key));
+        setAllowedQualities(allowed.map((q) => q.key));
+        setQualityIdx(allowed.length > 0 ? QUALITY_OPTIONS.indexOf(allowed[0]) : null);
         // 恢复已持久化的低延迟模式
         if (data.lowLatency) setLowLatency(true);
         setLoading(false);
@@ -138,6 +136,10 @@ export default function SharePage() {
 
   const handleStart = useCallback(async () => {
     setShareError('');
+    if (qualityIdx === null || !allowedQualities.includes(QUALITY_OPTIONS[qualityIdx]?.key)) {
+      setShareError('该服务器暂未开放任何共享画质，请联系服务器管理员。');
+      return;
+    }
     // 检查是否正在其他 session 共享
     const active = getActiveShare();
     if (active && active !== token) {
@@ -147,6 +149,7 @@ export default function SharePage() {
     const result = await screenShare.publish({
       qualityKey: QUALITY_OPTIONS[qualityIdx].key,
       lowLatency,
+      bitrateConfig: info?.qualityBitrates?.[QUALITY_OPTIONS[qualityIdx].key],
     });
     if (result.success) {
       const resp = await socket.startSharing(QUALITY_OPTIONS[qualityIdx].key, clientId, lowLatency);
@@ -157,7 +160,7 @@ export default function SharePage() {
         setShareError('无法开始共享，可能已有其他人正在共享或链接已失效。');
       }
     }
-  }, [screenShare, socket, qualityIdx, token, clientId, lowLatency]);
+  }, [screenShare, socket, qualityIdx, allowedQualities, token, clientId, lowLatency, info]);
 
   const handleStop = useCallback(async () => {
     await screenShare.stop();
@@ -261,7 +264,7 @@ export default function SharePage() {
                 'text-xs px-2 py-0.5 rounded-full',
                 lowLatency ? 'bg-blue-500/20 text-blue-300' : 'bg-green-500/20 text-green-300',
               )}>
-                {lowLatency ? '低延迟 400-800ms' : '普通模式 1500-2000ms'}
+                {lowLatency ? '低延迟 400-800ms' : '极速直播 1500-2000ms'}
               </span>
             </div>
           )}
@@ -273,7 +276,7 @@ export default function SharePage() {
               {QUALITY_OPTIONS.map((q) => {
                 const idx = QUALITY_OPTIONS.indexOf(q);
                 const enabled = allowedQualities.includes(q.key);
-                const selected = idx === qualityIdx;
+                const selected = qualityIdx !== null && idx === qualityIdx;
                 return (
                   <button
                     key={q.key}
@@ -297,6 +300,11 @@ export default function SharePage() {
               })}
             </div>
           </div>
+          {allowedQualities.length === 0 && (
+            <p className="text-sm text-yellow-300 text-center mb-4">
+              该服务器暂未开放任何共享画质，请联系服务器管理员。
+            </p>
+          )}
 
           {/* ===== 大按钮区域 ===== */}
           {screenShare.isSharing ? (
@@ -338,6 +346,7 @@ export default function SharePage() {
             /* GRACE 状态 - 共享者 - 可恢复，显示倒计时 */
             <button
               onClick={handleStart}
+              disabled={qualityIdx === null}
               className={cn(
                 'w-full py-5 rounded-2xl text-white font-semibold text-lg flex items-center justify-center gap-3 transition-all',
                 'bg-gradient-to-r from-brand-dark to-brand hover:scale-[1.01] disabled:opacity-40 disabled:cursor-not-allowed',
@@ -419,7 +428,7 @@ export default function SharePage() {
           <p className="text-xs text-dim text-center">
             {lowLatency
               ? '⚡ 低延迟模式：延迟降低约 60-70%（400-800ms），费用上涨约 100%'
-              : '当前为普通模式（延迟 1500-2000ms），费用较低'}
+              : '当前为极速直播（延迟 1500-2000ms），费用较低'}
           </p>
         )}
 

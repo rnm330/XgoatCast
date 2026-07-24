@@ -8,6 +8,7 @@ import {
   Param,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import * as bcrypt from 'bcryptjs';
@@ -17,6 +18,12 @@ import {
   UpdateGlobalConfigDto,
   UpdateServerDto,
 } from './super-admin.dto';
+import {
+  getVideoCoefficient,
+  QUALITY_PRESETS,
+  STANDARD_MINUTE_PRICE,
+  type QualityBitrateConfig,
+} from '../session/session.types';
 
 /** 用户 ID 脱敏：保留首 3 位和末 4 位 */
 function maskUserId(uid: string): string {
@@ -58,6 +65,20 @@ export class SuperAdminController {
     return {
       kookBotToken: cfg.kookBotToken ? '******' : '',
       publicDomain: cfg.publicDomain,
+      triggerWordLabels: cfg.triggerWordLabels,
+      qualityBitrates: cfg.qualityBitrates,
+      qualityProfiles: QUALITY_PRESETS.map((quality) => ({
+        key: quality.key,
+        label: quality.label,
+        width: quality.width,
+        height: quality.height,
+        frameRate: quality.frameRate,
+        interactiveViewerHourlyRate:
+          getVideoCoefficient(quality.tier, true) * STANDARD_MINUTE_PRICE * 60,
+        liveViewerHourlyRate:
+          getVideoCoefficient(quality.tier, false) * STANDARD_MINUTE_PRICE * 60,
+      })),
+      broadcasterHourlyRate: STANDARD_MINUTE_PRICE * 60,
     };
   }
 
@@ -69,7 +90,38 @@ export class SuperAdminController {
     if (dto.publicDomain !== undefined) {
       this.db.setGlobalConfig('publicDomain', dto.publicDomain);
     }
+    if (dto.qualityBitrates !== undefined) {
+      const sanitized = this.sanitizeQualityBitrates(dto.qualityBitrates);
+      this.db.setGlobalConfig('qualityBitrates', JSON.stringify(sanitized));
+    }
+    if (dto.triggerWordLabels !== undefined) {
+      const labels = [...new Set(dto.triggerWordLabels.map(word => word.trim()).filter(Boolean))];
+      if (labels.length === 0) throw new BadRequestException('至少保留一个触发词标签');
+      this.db.setTriggerWordLabels(labels);
+    }
     return { ok: true };
+  }
+
+  private sanitizeQualityBitrates(input: QualityBitrateConfig): QualityBitrateConfig {
+    const result: QualityBitrateConfig = {};
+    for (const quality of QUALITY_PRESETS) {
+      const value = input[quality.key] || {};
+      const bitrateMin = value.bitrateMin;
+      const bitrateMax = value.bitrateMax;
+      for (const [name, bitrate] of Object.entries({ bitrateMin, bitrateMax })) {
+        if (bitrate !== undefined && (!Number.isFinite(bitrate) || bitrate <= 0)) {
+          throw new BadRequestException(`${quality.label} 的 ${name} 必须为正数或留空`);
+        }
+      }
+      if (bitrateMin !== undefined && bitrateMax !== undefined && bitrateMax < bitrateMin) {
+        throw new BadRequestException(`${quality.label} 的最高码率不能低于最低码率`);
+      }
+      result[quality.key] = {
+        ...(bitrateMin !== undefined ? { bitrateMin } : {}),
+        ...(bitrateMax !== undefined ? { bitrateMax } : {}),
+      };
+    }
+    return result;
   }
 
   // ===== Server Management =====
@@ -106,11 +158,12 @@ export class SuperAdminController {
       agoraAppCertificate: s.agoraAppCertificate ? '******' : '',
       agoraTokenExpireSec: s.agoraTokenExpireSec,
       allowedQualities: JSON.parse(s.allowedQualities),
-      triggerWords: s.triggerWords,
+      enabledTriggerWords: s.triggerWords.split(',').map(word => word.trim()).filter(Boolean),
+      triggerWordLabels: this.db.getGlobalConfig().triggerWordLabels,
       idleTimeoutSec: s.idleTimeoutSec,
       heartbeatIntervalSec: s.heartbeatIntervalSec,
       noViewerTimeoutSec: s.noViewerTimeoutSec,
-      publicDomain: s.publicDomain,
+      publicDomain: this.db.getGlobalConfig().publicDomain,
       allowLowLatency: s.allowLowLatency,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
@@ -141,12 +194,21 @@ export class SuperAdminController {
       updates.agoraAppCertificate = dto.agoraAppCertificate;
     }
     if (dto.agoraTokenExpireSec !== undefined) updates.agoraTokenExpireSec = dto.agoraTokenExpireSec;
-    if (dto.allowedQualities !== undefined) updates.allowedQualities = JSON.stringify(dto.allowedQualities);
-    if (dto.triggerWords !== undefined) updates.triggerWords = dto.triggerWords;
+    if (dto.allowedQualities !== undefined) {
+      const validKeys = new Set(QUALITY_PRESETS.map(quality => quality.key));
+      const allowed = [...new Set(dto.allowedQualities.filter(key => validKeys.has(key)))];
+      if (allowed.length === 0) throw new BadRequestException('至少开放一个有效画质');
+      updates.allowedQualities = JSON.stringify(allowed);
+    }
+    if (dto.enabledTriggerWords !== undefined) {
+      const allowed = new Set(this.db.getGlobalConfig().triggerWordLabels);
+      const enabled = [...new Set(dto.enabledTriggerWords.map(word => word.trim()).filter(word => allowed.has(word)))];
+      if (enabled.length === 0) throw new BadRequestException('至少启用一个触发词标签');
+      updates.triggerWords = enabled.join(',');
+    }
     if (dto.idleTimeoutSec !== undefined) updates.idleTimeoutSec = dto.idleTimeoutSec;
     if (dto.heartbeatIntervalSec !== undefined) updates.heartbeatIntervalSec = dto.heartbeatIntervalSec;
     if (dto.noViewerTimeoutSec !== undefined) updates.noViewerTimeoutSec = dto.noViewerTimeoutSec;
-    if (dto.publicDomain !== undefined) updates.publicDomain = dto.publicDomain;
     if (dto.allowLowLatency !== undefined) updates.allowLowLatency = dto.allowLowLatency;
 
     this.db.updateServer(id, updates);

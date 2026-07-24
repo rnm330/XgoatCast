@@ -1,4 +1,5 @@
-import { IsString, IsOptional, IsArray, IsNumber, Min } from 'class-validator';
+import { IsString, IsOptional, IsArray, IsNumber, IsObject, Min } from 'class-validator';
+import type { QualityBitrateConfig } from '../session/session.types';
 
 export class SuperAdminLoginDto {
   @IsString()
@@ -13,6 +14,15 @@ export class UpdateGlobalConfigDto {
   @IsOptional()
   @IsString()
   publicDomain?: string;
+
+  @IsOptional()
+  @IsObject()
+  qualityBitrates?: QualityBitrateConfig;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  triggerWordLabels?: string[];
 }
 
 export class UpdateServerDto {
@@ -34,8 +44,9 @@ export class UpdateServerDto {
   allowedQualities?: string[];
 
   @IsOptional()
-  @IsString()
-  triggerWords?: string;
+  @IsArray()
+  @IsString({ each: true })
+  enabledTriggerWords?: string[];
 
   @IsOptional()
   @IsNumber()
@@ -51,10 +62,6 @@ export class UpdateServerDto {
   @IsNumber()
   @Min(30)
   noViewerTimeoutSec?: number;
-
-  @IsOptional()
-  @IsString()
-  publicDomain?: string;
 
   /** 是否允许共享者开启低延迟模式（1=允许，0=不允许） */
   @IsOptional()

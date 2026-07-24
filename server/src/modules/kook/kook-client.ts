@@ -139,6 +139,16 @@ export class KookClient extends EventEmitter {
     return this.postApi('/message/create', { target_id: channelId, content, type: 1 });
   }
 
+  /** 发送仅指定用户可见的临时文字消息 (type=1) */
+  async sendTempTextMessage(channelId: string, content: string, tempTargetUserId: string): Promise<any> {
+    return this.postApi('/message/create', {
+      target_id: channelId,
+      content,
+      type: 1,
+      temp_target_id: tempTargetUserId,
+    });
+  }
+
   /** 发送 KMarkdown 消息 (type=9) */
   async sendKMarkdownMessage(channelId: string, content: string): Promise<any> {
     return this.postApi('/message/create', { target_id: channelId, content, type: 9 });

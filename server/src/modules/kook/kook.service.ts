@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SessionService } from '../session/session.service';
 import { DatabaseService } from '../database/database.service';
 import { EventBusService } from '../events/events.service';
-import { buildShareLinkCard, buildEndedShareCard, buildHelpCard, buildBindCard, buildAlreadyBoundCard, buildBindRequestCard } from './card-builder';
+import { buildShareLinkCard, buildViewingCard, buildEndedShareCard, buildHelpCard, buildBindCard, buildAlreadyBoundCard, buildBindRequestCard } from './card-builder';
 import { KookClient, KookMessageEvent, KookButtonClickEvent } from './kook-client';
 
 @Injectable()
@@ -15,6 +15,7 @@ export class KookService implements OnModuleInit {
   /** 用户+频道维度的触发频率限制，防止快速连发导致重复创建 session */
   private recentTriggers = new Map<string, number>();
   private readonly TRIGGER_COOLDOWN_MS = 10000; // 10 秒冷却
+  private publishingViewingCards = new Set<string>();
 
   constructor(
     private readonly sessionService: SessionService,
@@ -218,7 +219,7 @@ export class KookService implements OnModuleInit {
   /** Get server config for a guild (guildId is snowflake ID from events) */
   private getServerConfig(guildId: string) {
     const server = this.db.getServer(guildId);
-    if (!server) return null;
+    if (!server || !server.bound || server.status !== 'active') return null;
     return {
       openId: server.openId,  // 公开 ID（用于面板显示）
       agora: {
@@ -233,7 +234,7 @@ export class KookService implements OnModuleInit {
         noViewerTimeoutSec: server.noViewerTimeoutSec,
       },
       triggerWords: server.triggerWords,
-      publicDomain: server.publicDomain || this.db.getGlobalConfig().publicDomain,
+      publicDomain: this.db.getGlobalConfig().publicDomain,
     };
   }
 
@@ -289,7 +290,11 @@ export class KookService implements OnModuleInit {
 
     // Get server config for trigger words
     const serverConfig = this.getServerConfig(guildId);
-    const triggerWordsStr = serverConfig?.triggerWords || '屏幕共享,共享屏幕';
+    if (!serverConfig) {
+      this.logger.debug(`Ignoring trigger for unbound or inactive server ${guildId || '(unknown)'}`);
+      return;
+    }
+    const triggerWordsStr = serverConfig.triggerWords;
     const triggerWords = triggerWordsStr
       .split(',')
       .map((w) => w.trim())
@@ -304,12 +309,6 @@ export class KookService implements OnModuleInit {
         `author_id=${authorId}, ` +
         `extra keys=${event.extra ? Object.keys(event.extra).join(',') : '(no extra)'}`,
       );
-
-      // Check if server is configured
-      if (!serverConfig) {
-        this.logger.warn(`No server config for guild ${guildId}, ignoring share command`);
-        return;
-      }
 
       // 用户+频道维度频率限制，防止快速连发重复创建 session
       const channelId =
@@ -349,8 +348,9 @@ export class KookService implements OnModuleInit {
 
     // 获取服务器信息以校验是否为服务器主
     let ownerId = '';
+    let guildInfo: any;
     try {
-      const guildInfo = await this.bot?.getGuild(guildId);
+      guildInfo = await this.bot?.getGuild(guildId);
       ownerId = guildInfo?.user_id || '';
     } catch (err: any) {
       this.logger.error(`[HELP] Failed to get guild info for ${guildId}: ${err?.message || err}`);
@@ -360,15 +360,21 @@ export class KookService implements OnModuleInit {
     // 非服务器主：发送使用说明卡片（临时卡片，含发起屏幕共享按钮）
     if (authorId !== ownerId) {
       const sc = this.getServerConfig(guildId);
-      await this.sendHelpTemp(event.target_id, authorId, sc?.triggerWords);
+      await this.sendHelpTemp(event.target_id, authorId, sc?.triggerWords, !!sc);
       this.logger.debug(`[HELP] Sent temp help card to non-owner ${authorId}`);
       return;
     }
 
-    const server = this.db.getServer(guildId);
+    let server = this.db.getServer(guildId);
     if (!server) {
-      await this.bot?.sendTextMessage(event.target_id, '此服务器尚未注册，请等待机器人自动加入或联系管理员。');
-      return;
+      server = this.db.createServer(
+        guildId,
+        guildInfo?.name || '',
+        ownerId,
+        '',
+        guildInfo?.open_id || '',
+      );
+      this.logger.log(`[HELP] Recreated deleted server ${guildId}; binding is required`);
     }
 
     const triggerWords = server.triggerWords || '屏幕共享,共享屏幕';
@@ -376,7 +382,7 @@ export class KookService implements OnModuleInit {
     // 已绑定：发送已绑定提示卡片（含触发词说明和管理面板入口）
     if (server.bound) {
       const globalCfg = this.db.getGlobalConfig();
-      const domain = server.publicDomain || globalCfg.publicDomain;
+      const domain = globalCfg.publicDomain;
       const manageUrl = `${domain}/${guildId}`;
       const card = buildAlreadyBoundCard({
         guildName: server.guildName,
@@ -395,7 +401,7 @@ export class KookService implements OnModuleInit {
     // 未绑定：生成临时 token 并发送绑定卡片
     const bindToken = this.db.generateBindToken(guildId);
     const globalCfg = this.db.getGlobalConfig();
-    const bindUrl = `${server.publicDomain || globalCfg.publicDomain}/${guildId}?t=${bindToken}`;
+    const bindUrl = `${globalCfg.publicDomain}/${guildId}?t=${bindToken}`;
     const card = buildBindRequestCard({
       guildName: server.guildName,
       openId: server.openId || undefined,
@@ -426,27 +432,22 @@ export class KookService implements OnModuleInit {
 
     const publicDomain = serverConfig.publicDomain.replace(/\/+$/, '');
     const shareLink = `${publicDomain}/share?t=${session.token}`;
-    const viewLink = `${publicDomain}/view?t=${session.token}`;
 
-    // 发送共享链接卡片（带「开始共享」与「点击观看」按钮）
+    // 仅发起人可见；公开观看卡片在发布端真正开始后发送。
     const card = buildShareLinkCard({
       sharerUsername: authorName,
       shareUrl: shareLink,
-      viewUrl: viewLink,
     });
     try {
-      const result = await this.bot?.sendCardMessage(channelId, card);
-      const msgId = result?.msg_id || result?.data?.msg_id;
-      if (msgId) {
-        this.sessionService.setCardMessageId(session.id, msgId);
-      }
-      this.logger.log(`share link card sent to ${channelId} for ${authorName}, msgId=${msgId || 'none'}`);
+      await this.bot?.sendTempCardMessage(channelId, card, authorId);
+      this.logger.log(`temporary start card sent to ${authorId} in ${channelId}`);
     } catch (err: any) {
-      this.logger.error('send share link card failed: ' + (err?.message || err));
-      // 卡片发送失败时降级为纯文本
-      await this.bot?.sendKMarkdownMessage(
+      this.logger.error('send temporary start card failed: ' + (err?.message || err));
+      this.sessionService.deleteSession(session.id);
+      await this.sendTempNotice(
         channelId,
-        '屏幕共享已创建，点击链接开始共享：' + shareLink,
+        authorId,
+        `发起屏幕共享失败：${err?.message || '无法发送开始卡片，请稍后重试'}`,
       );
     }
   }
@@ -469,6 +470,7 @@ export class KookService implements OnModuleInit {
     // 检查用户是否有活跃的共享会话
     if (this.sessionService.hasActiveSession(event.userId)) {
       this.logger.warn(`button_click rejected: user ${event.userId} already has an active session`);
+      await this.sendTempNotice(event.targetId, event.userId, '你已有一个未结束的屏幕共享，请先结束后再发起。');
       return;
     }
 
@@ -477,6 +479,7 @@ export class KookService implements OnModuleInit {
     const lastTrigger = this.recentTriggers.get(cooldownKey);
     if (lastTrigger && Date.now() - lastTrigger < this.TRIGGER_COOLDOWN_MS) {
       this.logger.warn(`button_click cooldown: ${event.userId} in ${event.targetId}`);
+      await this.sendTempNotice(event.targetId, event.userId, '操作过于频繁，请稍后再试。');
       return;
     }
     this.recentTriggers.set(cooldownKey, Date.now());
@@ -497,6 +500,13 @@ export class KookService implements OnModuleInit {
       }
     }
 
+    const serverConfig = this.getServerConfig(guildId);
+    if (!serverConfig) {
+      this.logger.warn(`button_click ignored for unbound or inactive server ${guildId || '(unknown)'}`);
+      await this.sendTempNotice(event.targetId, event.userId, '该服务器尚未绑定或当前不可用，请让服务器主先发送 /xchelp 完成绑定。');
+      return;
+    }
+
     const session = this.sessionService.createSession({
       sharerUserId: event.userId,
       sharerUsername: authorName,
@@ -505,39 +515,72 @@ export class KookService implements OnModuleInit {
       serverId: guildId,  // 使用雪花 ID
     });
 
-    // Get server config for share/view links
-    const serverConfig = this.getServerConfig(event.guildId);
-    const publicDomain = (serverConfig?.publicDomain || this.db.getGlobalConfig().publicDomain).replace(/\/+$/, '');
+    const publicDomain = serverConfig.publicDomain.replace(/\/+$/, '');
     const shareLink = `${publicDomain}/share?t=${session.token}`;
-    const viewLink = `${publicDomain}/view?t=${session.token}`;
 
     const card = buildShareLinkCard({
       sharerUsername: authorName,
       shareUrl: shareLink,
-      viewUrl: viewLink,
     });
 
     try {
-      const result = await this.bot?.sendCardMessage(event.targetId, card);
-      const msgId = result?.msg_id || result?.data?.msg_id;
-      if (msgId) {
-        this.sessionService.setCardMessageId(session.id, msgId);
-      }
-      this.logger.log(`reshare card sent to ${event.targetId} for ${authorName}, msgId=${msgId || 'none'}`);
+      await this.bot?.sendTempCardMessage(event.targetId, card, event.userId);
+      this.logger.log(`temporary button start card sent to ${event.userId} in ${event.targetId}`);
     } catch (err: any) {
-      this.logger.error('reshare send card failed: ' + (err?.message || err));
+      this.logger.error('temporary button start card failed: ' + (err?.message || err));
+      this.sessionService.deleteSession(session.id);
+      await this.sendTempNotice(
+        event.targetId,
+        event.userId,
+        `发起屏幕共享失败：${err?.message || '无法发送开始卡片，请稍后重试'}`,
+      );
     }
   }
 
   private async handleSessionStarted(event: {
     sessionId: string;
+    token: string;
     sharerUsername: string;
     targetChannelId: string;
+    guildId: string;
   }) {
     this.logger.log(
       `handleSessionStarted: sessionId=${event.sessionId}, targetChannelId=${event.targetChannelId || '(empty)'}, bot=${!!this.bot}, isRunning=${this.bot?.isRunning()}`,
     );
-    // 不再发送独立的「屏幕共享已开始」卡片，共享链接卡片已包含观看按钮
+    const session = this.sessionService.getById(event.sessionId);
+    if (!session || session.cardMessageId || this.publishingViewingCards.has(event.sessionId)) return;
+    const serverConfig = this.getServerConfig(event.guildId);
+    if (!serverConfig || !event.targetChannelId || !this.bot?.isRunning()) return;
+
+    this.publishingViewingCards.add(event.sessionId);
+    try {
+      const current = this.sessionService.getById(event.sessionId);
+      if (!current || current.cardMessageId || current.status !== 'active') return;
+      const publicDomain = serverConfig.publicDomain.replace(/\/+$/, '');
+      const card = buildViewingCard({
+        sharerUsername: event.sharerUsername,
+        viewUrl: `${publicDomain}/view?t=${event.token}`,
+      });
+      const result = await this.bot.sendCardMessage(event.targetChannelId, card);
+      const msgId = result?.msg_id || result?.data?.msg_id;
+      if (msgId) {
+        this.sessionService.setCardMessageId(event.sessionId, msgId);
+        const latest = this.sessionService.getById(event.sessionId);
+        if (latest?.status === 'ended') {
+          await this.handleSessionEnded({
+            sessionId: event.sessionId,
+            targetChannelId: event.targetChannelId,
+            cardMessageId: msgId,
+            reason: 'ended_during_viewing_card_publish',
+          });
+        }
+      }
+      this.logger.log(`public viewing card sent for ${event.sessionId}, msgId=${msgId || 'none'}`);
+    } catch (err: any) {
+      this.logger.error(`send public viewing card failed for ${event.sessionId}: ${err?.message || err}`);
+    } finally {
+      this.publishingViewingCards.delete(event.sessionId);
+    }
   }
 
   private async handleSessionEnded(event: {
@@ -566,7 +609,7 @@ export class KookService implements OnModuleInit {
     const standardMinutes = info?.standardMinutes || 0;
     const estimatedCost = info?.estimatedCost || 0;
 
-    // 如果存在 cardMessageId，则更新原有卡片；否则发送新卡片
+    // 只有真正开播后创建过公开观看卡片，才允许发布公开结束状态。
     if (event.cardMessageId) {
       try {
         const endedShareCard = buildEndedShareCard({
@@ -583,9 +626,8 @@ export class KookService implements OnModuleInit {
         // 更新失败时，发送新卡片作为降级方案
         await this.sendNewEndedCard(event.targetChannelId, session, standardMinutes, estimatedCost);
       }
-    } else if (event.targetChannelId) {
-      // 没有 cardMessageId 时，发送新卡片
-      await this.sendNewEndedCard(event.targetChannelId, session, standardMinutes, estimatedCost);
+    } else {
+      this.logger.log(`session ${event.sessionId} ended without a public viewing card; no public ended card sent`);
     }
   }
 
@@ -612,61 +654,21 @@ export class KookService implements OnModuleInit {
     }
   }
 
-  /** 推送共享链接卡片到指定频道（供 reshare 端点调用） */
-  async pushShareLinkCard(channelId: string, sharerUsername: string, guildId?: string): Promise<string | null> {
-    // 如果 guildId 为空，尝试通过频道 ID 查询
-    if (!guildId && channelId) {
-      try {
-        const channelInfo = await this.bot?.getChannelInfo(channelId);
-        guildId = channelInfo?.guild_id || '';
-        if (guildId) {
-          this.logger.log(`pushShareLinkCard: Resolved guild_id=${guildId} from channel ${channelId}`);
-        }
-      } catch (err) {
-        this.logger.warn(`pushShareLinkCard: Failed to get guild_id from channel ${channelId}: ${err}`);
-      }
-    }
-
-    const session = this.sessionService.createSession({
-      sharerUserId: 'reshare',
-      sharerUsername,
-      guildId: guildId || '',
-      targetChannelId: channelId,
-      serverId: guildId || '',
-    });
-
-    const serverConfig = guildId ? this.getServerConfig(guildId) : null;
-    const publicDomain = (serverConfig?.publicDomain || this.db.getGlobalConfig().publicDomain).replace(/\/+$/, '');
-    const shareLink = `${publicDomain}/share?t=${session.token}`;
-    const viewLink = `${publicDomain}/view?t=${session.token}`;
-
-    const card = buildShareLinkCard({
-      sharerUsername,
-      shareUrl: shareLink,
-      viewUrl: viewLink,
-    });
-    try {
-      const result = await this.bot?.sendCardMessage(channelId, card);
-      const msgId = result?.msg_id || result?.data?.msg_id;
-      if (msgId) {
-        this.sessionService.setCardMessageId(session.id, msgId);
-      }
-      this.logger.log(`reshare: share link card pushed to ${channelId}, msgId=${msgId || 'none'}`);
-      return shareLink;
-    } catch (err: any) {
-      this.logger.error('reshare: push share link card failed: ' + (err?.message || err));
-      // 卡片发送失败，清理已创建的孤儿 session
-      this.sessionService.deleteSession(session.id);
-      return null;
-    }
-  }
-
-  private async sendHelpTemp(channelId: string, userId: string, triggerWords?: string) {
-    const card = buildHelpCard(triggerWords ? { triggerWords, showShareButton: true } : { showShareButton: true });
+  private async sendHelpTemp(channelId: string, userId: string, triggerWords?: string, showShareButton = true) {
+    const card = buildHelpCard({ triggerWords, showShareButton });
     try {
       await this.bot?.sendTempCardMessage(channelId, card, userId);
     } catch (err: any) {
       this.logger.error('send temp help card failed: ' + (err?.message || err));
+    }
+  }
+
+  private async sendTempNotice(channelId: string, userId: string, message: string) {
+    if (!channelId || !userId) return;
+    try {
+      await this.bot?.sendTempTextMessage(channelId, message, userId);
+    } catch (err: any) {
+      this.logger.error(`send temporary notice failed: ${err?.message || err}`);
     }
   }
 }

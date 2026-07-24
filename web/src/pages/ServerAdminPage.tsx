@@ -452,6 +452,40 @@ function ServerConfigPanel({ serverId }: { serverId: string }) {
         </label>
       </ConfigSection>
 
+      <ConfigSection title="触发词" desc="选择本服务器允许使用的全局触发词标签">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+          {(config.triggerWordLabels || []).map((word: string) => {
+            const checked = (config.enabledTriggerWords || []).includes(word);
+            return (
+              <label
+                key={word}
+                className={cn(
+                  'flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors text-sm',
+                  checked
+                    ? 'border-brand/40 bg-brand/10 text-white'
+                    : 'border-white/8 bg-white/[0.03] text-muted hover:border-white/15',
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => {
+                    const current = config.enabledTriggerWords || [];
+                    const next = e.target.checked
+                      ? [...current, word]
+                      : current.filter((item: string) => item !== word);
+                    if (next.length > 0) update(['enabledTriggerWords'], next);
+                  }}
+                  className="accent-brand"
+                />
+                {word}
+              </label>
+            );
+          })}
+        </div>
+        <p className="text-xs text-dim mt-2">至少启用一个触发词。</p>
+      </ConfigSection>
+
       {error && (
         <p className="text-sm text-red-300 bg-red-500/10 rounded-lg px-4 py-2">{error}</p>
       )}

@@ -3,12 +3,15 @@ import Database from 'better-sqlite3';
 import { join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import { randomBytes } from 'crypto';
+import { getDefaultQualityBitrates, QualityBitrateConfig } from '../session/session.types';
 
 // ===== Types =====
 
 export interface GlobalConfig {
   kookBotToken: string;
   publicDomain: string;
+  triggerWordLabels: string[];
+  qualityBitrates: QualityBitrateConfig;
 }
 
 export interface ServerRecord {
@@ -61,6 +64,8 @@ export interface ServerSession {
   viewerCount: number;
   peakViewers: number;
   totalViewerJoins: number;
+  /** 所有观众在 ACTIVE 状态下的累计在线毫秒；null 表示旧记录没有该数据 */
+  viewerDurationMs: number | null;
   quality: string;
   cardMessageId: string | null;
   manualCreated: number;
@@ -205,6 +210,7 @@ export class DatabaseService implements OnModuleDestroy {
         viewer_count        INTEGER NOT NULL DEFAULT 0,
         peak_viewers        INTEGER NOT NULL DEFAULT 0,
         total_viewer_joins  INTEGER NOT NULL DEFAULT 0,
+        viewer_duration_ms  INTEGER NOT NULL DEFAULT 0,
         quality             TEXT NOT NULL DEFAULT '1080p_2',
         card_message_id     TEXT,
         manual_created      INTEGER NOT NULL DEFAULT 0,
@@ -231,6 +237,11 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN low_latency INTEGER NOT NULL DEFAULT 0`);
       this.logger.log('Added low_latency column to sessions table');
     }
+    if (!sessCols.some(c => c.name === 'viewer_duration_ms')) {
+      // 旧记录保留 NULL，计费展示时继续使用旧的峰值人数估算。
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN viewer_duration_ms INTEGER`);
+      this.logger.log('Added viewer_duration_ms column to sessions table');
+    }
 
     // Seed default global config if empty
     const row = this.db.prepare('SELECT COUNT(*) as cnt FROM global_config').get() as any;
@@ -238,7 +249,21 @@ export class DatabaseService implements OnModuleDestroy {
       const ins = this.db.prepare('INSERT OR IGNORE INTO global_config (key, value) VALUES (?, ?)');
       ins.run('kookBotToken', process.env.KOOK_BOT_TOKEN || '');
       ins.run('publicDomain', 'http://localhost:3520');
+      ins.run('triggerWordLabels', JSON.stringify(['屏幕共享', '共享屏幕']));
       this.logger.log('Seeded default global config');
+    }
+
+    // Preserve every existing per-server trigger word when introducing the
+    // global label library.
+    const labelRow = this.db.prepare("SELECT value FROM global_config WHERE key = 'triggerWordLabels'").get() as any;
+    if (!labelRow) {
+      const labels = new Set(['屏幕共享', '共享屏幕']);
+      const existing = this.db.prepare('SELECT trigger_words FROM servers').all() as any[];
+      for (const row of existing) {
+        for (const word of this.parseTriggerWords(row.trigger_words)) labels.add(word);
+      }
+      this.setGlobalConfig('triggerWordLabels', JSON.stringify([...labels]));
+      this.logger.log('Created global trigger word label library from existing server settings');
     }
 
     // Backfill empty kookBotToken from env (for existing databases)
@@ -260,7 +285,54 @@ export class DatabaseService implements OnModuleDestroy {
     return {
       kookBotToken: map.get('kookBotToken') || '',
       publicDomain: map.get('publicDomain') || 'http://localhost:3520',
+      triggerWordLabels: this.parseTriggerWordLabels(map.get('triggerWordLabels')),
+      qualityBitrates: this.parseQualityBitrates(map.get('qualityBitrates')),
     };
+  }
+
+  private parseTriggerWords(value?: string): string[] {
+    return [...new Set((value || '').split(',').map(word => word.trim()).filter(Boolean))];
+  }
+
+  private parseTriggerWordLabels(value?: string): string[] {
+    if (!value) return ['屏幕共享', '共享屏幕'];
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        const labels = [...new Set(parsed.map(String).map(word => word.trim()).filter(Boolean))];
+        if (labels.length > 0) return labels;
+      }
+    } catch {
+      // Fall through to legacy comma-separated values.
+    }
+    const legacy = this.parseTriggerWords(value);
+    return legacy.length > 0 ? legacy : ['屏幕共享', '共享屏幕'];
+  }
+
+  setTriggerWordLabels(labels: string[]): void {
+    const normalized = [...new Set(labels.map(word => word.trim()).filter(Boolean))];
+    const allowed = new Set(normalized);
+    const servers = this.db.prepare('SELECT server_id, trigger_words FROM servers').all() as any[];
+    const update = this.db.prepare('UPDATE servers SET trigger_words = ?, updated_at = ? WHERE server_id = ?');
+    const apply = this.db.transaction(() => {
+      this.setGlobalConfig('triggerWordLabels', JSON.stringify(normalized));
+      for (const server of servers) {
+        let enabled = this.parseTriggerWords(server.trigger_words).filter(word => allowed.has(word));
+        if (enabled.length === 0 && normalized.length > 0) enabled = [normalized[0]];
+        update.run(enabled.join(','), Date.now(), server.server_id);
+      }
+    });
+    apply();
+  }
+
+  private parseQualityBitrates(value?: string): QualityBitrateConfig {
+    if (!value) return getDefaultQualityBitrates();
+    try {
+      return JSON.parse(value);
+    } catch {
+      this.logger.warn('Invalid qualityBitrates global config; using defaults');
+      return getDefaultQualityBitrates();
+    }
   }
 
   setGlobalConfig(key: string, value: string): void {
@@ -295,6 +367,7 @@ export class DatabaseService implements OnModuleDestroy {
       viewerCount: row.viewer_count,
       peakViewers: row.peak_viewers,
       totalViewerJoins: row.total_viewer_joins,
+      viewerDurationMs: row.viewer_duration_ms ?? null,
       quality: row.quality,
       cardMessageId: row.card_message_id,
       manualCreated: row.manual_created,
@@ -375,9 +448,9 @@ export class DatabaseService implements OnModuleDestroy {
     
     const serverSecret = randomBytes(32).toString('hex');
     this.db.prepare(`
-      INSERT INTO servers (server_id, open_id, guild_name, owner_id, owner_username, bound, status, public_domain, server_secret, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?)
-    `).run(serverId, openId || '', guildName, ownerId, ownerUsername, globalCfg.publicDomain, serverSecret, now, now);
+      INSERT INTO servers (server_id, open_id, guild_name, owner_id, owner_username, bound, status, public_domain, trigger_words, server_secret, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
+    `).run(serverId, openId || '', guildName, ownerId, ownerUsername, globalCfg.publicDomain, globalCfg.triggerWordLabels.join(','), serverSecret, now, now);
     return this.getServer(serverId)!;
   }
 
@@ -462,9 +535,12 @@ export class DatabaseService implements OnModuleDestroy {
 
   /** 彻底删除服务器及其会话（仅超级管理员手动操作） */
   deleteServer(serverId: string): void {
-    this.db.prepare('DELETE FROM servers WHERE server_id = ?').run(serverId);
-    this.db.prepare('DELETE FROM sessions WHERE server_id = ?').run(serverId);
-    this.db.prepare('DELETE FROM server_events WHERE server_id = ?').run(serverId);
+    const remove = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM sessions WHERE server_id = ?').run(serverId);
+      this.db.prepare('DELETE FROM server_events WHERE server_id = ?').run(serverId);
+      this.db.prepare('DELETE FROM servers WHERE server_id = ?').run(serverId);
+    });
+    remove();
     this.logger.log(`Deleted server ${serverId} and its sessions/events`);
   }
 
@@ -528,14 +604,14 @@ export class DatabaseService implements OnModuleDestroy {
       INSERT INTO sessions (
         id, token, channel, server_id, sharer_user_id, sharer_username,
         guild_id, target_channel_id, status, viewer_count, peak_viewers,
-        total_viewer_joins, quality, card_message_id, manual_created,
+        total_viewer_joins, viewer_duration_ms, quality, card_message_id, manual_created,
         created_at, started_at, ended_at, duration_ms, last_heartbeat,
         grace_started_at, grace_reason, last_viewer_at, publisher_client_id,
         low_latency
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?
@@ -545,7 +621,7 @@ export class DatabaseService implements OnModuleDestroy {
       session.sharerUserId, session.sharerUsername,
       session.guildId, session.targetChannelId, session.status,
       session.viewerCount, session.peakViewers,
-      session.totalViewerJoins, session.quality, session.cardMessageId,
+      session.totalViewerJoins, session.viewerDurationMs, session.quality, session.cardMessageId,
       session.manualCreated,
       session.createdAt, session.startedAt, session.endedAt,
       session.durationMs, session.lastHeartbeat,
@@ -558,7 +634,7 @@ export class DatabaseService implements OnModuleDestroy {
   private readonly ALLOWED_SESSION_COLS = new Set([
     'token', 'channel', 'server_id', 'sharer_user_id', 'sharer_username',
     'guild_id', 'target_channel_id', 'status', 'viewer_count', 'peak_viewers',
-    'total_viewer_joins', 'quality', 'card_message_id', 'manual_created',
+    'total_viewer_joins', 'viewer_duration_ms', 'quality', 'card_message_id', 'manual_created',
     'created_at', 'started_at', 'ended_at', 'duration_ms', 'last_heartbeat',
     'grace_started_at', 'grace_reason', 'last_viewer_at', 'publisher_client_id',
     'low_latency',

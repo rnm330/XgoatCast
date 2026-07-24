@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Settings, Server, LogOut, ShieldCheck, ExternalLink } from 'lucide-react';
+import { Settings, Server, LogOut, ShieldCheck, ExternalLink, Trash2, Plus, X } from 'lucide-react';
 import { api, getSuperAdminToken, clearSuperAdminToken } from '../lib/api';
 import { cn } from '../lib/utils';
 
@@ -183,6 +183,7 @@ function SuperLoginForm({ onSuccess }: { onSuccess: () => void }) {
 
 function GlobalConfigPanel() {
   const [config, setConfig] = useState<any>(null);
+  const [newTriggerWord, setNewTriggerWord] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -205,6 +206,24 @@ function GlobalConfigPanel() {
   };
 
   if (!config) return <div className="text-muted text-sm">加载中...</div>;
+
+  const updateBitrate = (
+    qualityKey: string,
+    field: 'bitrateMin' | 'bitrateMax',
+    rawValue: string,
+  ) => {
+    const value = rawValue === '' ? undefined : Number(rawValue);
+    setConfig((current: any) => ({
+      ...current,
+      qualityBitrates: {
+        ...(current.qualityBitrates || {}),
+        [qualityKey]: {
+          ...(current.qualityBitrates?.[qualityKey] || {}),
+          [field]: value,
+        },
+      },
+    }));
+  };
 
   return (
     <div className="space-y-6">
@@ -232,6 +251,126 @@ function GlobalConfigPanel() {
               className="w-full bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
             />
           </div>
+        </div>
+      </div>
+
+      <div className="glass rounded-2xl p-5">
+        <h3 className="font-semibold text-white">触发词标签库</h3>
+        <p className="text-xs text-muted mt-0.5 mb-4">
+          超管维护可用标签；各服务器管理员只能从这里选择要启用的触发词。
+        </p>
+        <div className="flex flex-wrap gap-2 mb-4">
+          {(config.triggerWordLabels || []).map((word: string) => (
+            <span key={word} className="inline-flex items-center gap-1.5 rounded-full bg-brand/15 px-3 py-1.5 text-sm text-brand-light">
+              {word}
+              <button
+                type="button"
+                onClick={() => setConfig({
+                  ...config,
+                  triggerWordLabels: config.triggerWordLabels.filter((item: string) => item !== word),
+                })}
+                className="text-muted hover:text-red-300"
+                aria-label={`删除触发词 ${word}`}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={newTriggerWord}
+            onChange={(e) => setNewTriggerWord(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              const word = newTriggerWord.trim();
+              if (!word || config.triggerWordLabels.includes(word)) return;
+              setConfig({ ...config, triggerWordLabels: [...config.triggerWordLabels, word] });
+              setNewTriggerWord('');
+            }}
+            placeholder="输入新触发词"
+            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const word = newTriggerWord.trim();
+              if (!word || config.triggerWordLabels.includes(word)) return;
+              setConfig({ ...config, triggerWordLabels: [...config.triggerWordLabels, word] });
+              setNewTriggerWord('');
+            }}
+            className="btn-brand px-4 py-2 rounded-lg text-white text-sm inline-flex items-center gap-1.5"
+          >
+            <Plus className="w-4 h-4" /> 添加
+          </button>
+        </div>
+      </div>
+
+      <div className="glass rounded-2xl p-5">
+        <h3 className="font-semibold text-white">画质与码率</h3>
+        <p className="text-xs text-muted mt-0.5">
+          码率单位为 Kbps；任一字段留空即不向 Agora 传递该项，由 SDK 与浏览器自行协商。
+        </p>
+        <p className="text-xs text-dim mt-1 mb-4">
+          费率按分辨率档位和直播模式自动计算，与手动设置的码率无关。主播基础费率：
+          {Number(config.broadcasterHourlyRate || 0).toFixed(2)} 元/小时。
+        </p>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[840px] text-sm">
+            <thead>
+              <tr className="border-b border-white/10 text-left text-muted">
+                <th className="px-3 py-2">画质</th>
+                <th className="px-3 py-2">分辨率 / 帧率</th>
+                <th className="px-3 py-2">最低码率</th>
+                <th className="px-3 py-2">最高码率</th>
+                <th className="px-3 py-2">互动视频</th>
+                <th className="px-3 py-2">极速直播</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(config.qualityProfiles || []).map((profile: any) => {
+                const bitrate = config.qualityBitrates?.[profile.key] || {};
+                return (
+                  <tr key={profile.key} className="border-b border-white/5">
+                    <td className="px-3 py-3 font-medium text-white">{profile.label}</td>
+                    <td className="px-3 py-3 text-muted">
+                      {profile.width}×{profile.height} / {profile.frameRate}fps
+                    </td>
+                    <td className="px-3 py-3">
+                      <input
+                        type="number"
+                        min="1"
+                        step="100"
+                        value={bitrate.bitrateMin ?? ''}
+                        onChange={(e) => updateBitrate(profile.key, 'bitrateMin', e.target.value)}
+                        placeholder="自动"
+                        className="w-28 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <input
+                        type="number"
+                        min="1"
+                        step="100"
+                        value={bitrate.bitrateMax ?? ''}
+                        onChange={(e) => updateBitrate(profile.key, 'bitrateMax', e.target.value)}
+                        placeholder="自动"
+                        className="w-28 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
+                      />
+                    </td>
+                    <td className="px-3 py-3 text-blue-300">
+                      {Number(profile.interactiveViewerHourlyRate).toFixed(2)} 元/观众小时
+                    </td>
+                    <td className="px-3 py-3 text-green-300">
+                      {Number(profile.liveViewerHourlyRate).toFixed(2)} 元/观众小时
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -341,9 +480,7 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
   const [sessions, setSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ServerDetailTab>('events');
-  const [triggerWords, setTriggerWords] = useState('');
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [savedConfig, setSavedConfig] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -354,7 +491,6 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
     ])
       .then(([serverData, eventsData, sessionsData]) => {
         setServer(serverData);
-        setTriggerWords(serverData.triggerWords || '');
         setEvents(eventsData);
         setSessions(sessionsData);
       })
@@ -418,6 +554,28 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
             >
               打开管理面板
             </a>
+            <button
+              type="button"
+              disabled={deleting}
+              onClick={async () => {
+                const confirmed = window.confirm(
+                  `确定删除服务器“${server.guildName || server.serverId}”吗？\n\n服务器配置、绑定信息、事件和会话记录都会被删除。再次注册后必须重新绑定。`,
+                );
+                if (!confirmed) return;
+                setDeleting(true);
+                try {
+                  await api.deleteSuperServer(serverId);
+                  onBack();
+                } catch (e: any) {
+                  alert(e.message || '删除失败');
+                  setDeleting(false);
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg text-sm text-center bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors inline-flex items-center justify-center gap-1.5 disabled:opacity-40"
+            >
+              <Trash2 className="w-4 h-4" />
+              {deleting ? '删除中...' : '删除服务器'}
+            </button>
           </div>
         </div>
 
@@ -432,37 +590,6 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
           </p>
         </div>
 
-        {/* 触发词管理 */}
-        <div className="mt-4 pt-4 border-t border-white/10">
-          <label className="text-xs text-muted mb-1.5 block">触发词（逗号分隔，用户发送包含触发词的消息将触发屏幕共享）</label>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={triggerWords}
-              onChange={(e) => setTriggerWords(e.target.value)}
-              placeholder="屏幕共享,共享屏幕"
-              className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
-            />
-            <button
-              onClick={async () => {
-                setSavingConfig(true);
-                try {
-                  await api.updateSuperServer(serverId, { triggerWords });
-                  setSavedConfig(true);
-                  setTimeout(() => setSavedConfig(false), 2000);
-                } catch (e: any) {
-                  alert(e.message || '保存失败');
-                } finally {
-                  setSavingConfig(false);
-                }
-              }}
-              disabled={savingConfig}
-              className="btn-brand px-4 py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40"
-            >
-              {savingConfig ? '保存中...' : savedConfig ? '已保存' : '保存'}
-            </button>
-          </div>
-        </div>
       </div>
 
       {/* 选项卡：事件日志 / 会话记录 */}

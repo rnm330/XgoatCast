@@ -33,6 +33,11 @@ export class UpdateServerConfigDto {
   allowedQualities?: string[];
 
   @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  enabledTriggerWords?: string[];
+
+  @IsOptional()
   @IsNumber()
   @Min(10)
   idleTimeoutSec?: number;
@@ -46,10 +51,6 @@ export class UpdateServerConfigDto {
   @IsNumber()
   @Min(30)
   noViewerTimeoutSec?: number;
-
-  @IsOptional()
-  @IsString()
-  publicDomain?: string;
 
   @IsOptional()
   @IsNumber()

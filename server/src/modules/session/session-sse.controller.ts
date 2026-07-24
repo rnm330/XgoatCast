@@ -118,13 +118,9 @@ export class SessionSseController implements OnModuleInit {
       return;
     }
 
-    // 观众连接后，同步指标到 DB + 推送状态给所有客户端
+    // 观众连接后，按 viewerId 去重并开始累计 ACTIVE 状态下的观看时长
     if (resolvedRole === 'viewer') {
-      this.sessionService.updateViewerMetrics(
-        session.id,
-        this.countViewers(session.id),
-        true,
-      );
+      this.sessionService.viewerConnected(session.id, uid);
     }
 
     // ===== 发布端心跳保活 =====
@@ -166,13 +162,9 @@ export class SessionSseController implements OnModuleInit {
         `SSE client disconnected: session=${session.id}, role=${resolvedRole}`,
       );
 
-      // 观众离开后，同步指标到 DB + 推送状态给所有客户端
+      // 最后一条同 viewerId 连接断开时结算本次观看区间
       if (wasViewer) {
-        this.sessionService.updateViewerMetrics(
-          session.id,
-          this.countViewers(session.id),
-          false,
-        );
+        this.sessionService.viewerDisconnected(session.id, uid);
       }
     });
   }
@@ -194,11 +186,13 @@ export class SessionSseController implements OnModuleInit {
     };
   }
 
-  /** 统计指定 session 的当前在线观众数（活跃 SSE 连接中 role=viewer 的数量） */
+  /** 统计当前在线的唯一 viewerId 数，避免重连重叠造成重复计数。 */
   private countViewers(sessionId: string): number {
     const clients = this.sseClients.get(sessionId);
     if (!clients) return 0;
-    return clients.filter((c) => c.role === 'viewer').length;
+    return new Set(
+      clients.filter((c) => c.role === 'viewer').map((c) => c.uid),
+    ).size;
   }
 
   /** 向指定 session 的所有 SSE 客户端推送事件 */

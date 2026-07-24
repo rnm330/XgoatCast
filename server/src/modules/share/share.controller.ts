@@ -14,6 +14,7 @@ import { ShareTokenGuard } from '../auth/guards/share-token.guard';
 import { AgoraService } from '../agora/agora.service';
 import { SessionService } from '../session/session.service';
 import { AgoraRole } from '../agora/agora.types';
+import { DatabaseService } from '../database/database.service';
 
 @Controller('api/share')
 export class ShareController {
@@ -22,6 +23,7 @@ export class ShareController {
   constructor(
     private readonly agora: AgoraService,
     private readonly sessionService: SessionService,
+    private readonly db: DatabaseService,
   ) {}
 
   @Get('info')
@@ -33,6 +35,7 @@ export class ShareController {
     return {
       ...info,
       allowedQualities,
+      qualityBitrates: this.db.getGlobalConfig().qualityBitrates,
     };
   }
 
@@ -61,12 +64,20 @@ export class ShareController {
     @Body('clientId') clientId?: string,
     @Body('lowLatency') lowLatency?: boolean,
   ) {
+    const serverId = req.session.guildId || '';
+    const allowedQualities = this.agora.getAllowedQualities(serverId);
+    if (!quality || !allowedQualities.includes(quality)) {
+      throw new HttpException(
+        { message: '该画质未对本服务器开放，请刷新页面后重新选择', code: 'QUALITY_NOT_ALLOWED' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
     const session = this.sessionService.startSharing(
       req.session.token,
       clientId,
       lowLatency,
     );
-    if (session && quality && /^[a-zA-Z0-9]+$/.test(quality)) {
+    if (session) {
       this.sessionService.updateQuality(session.id, quality);
     }
     if (!session) {

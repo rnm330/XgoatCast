@@ -6,6 +6,12 @@ import { AgoraService } from '../agora/agora.service';
 import { EventBusService } from '../events/events.service';
 import { SessionStatus, ShareSession, SessionInfo, getQualityInfo, getAudioCoefficient, getVideoCoefficient, STANDARD_MINUTE_PRICE } from './session.types';
 
+interface ViewerPresence {
+  connections: number;
+  /** 仅在会话 ACTIVE 时记录，用于排除等待和宽限期。 */
+  billingStartedAt: number | null;
+}
+
 @Injectable()
 export class SessionService implements OnModuleInit {
   private readonly logger = new Logger(SessionService.name);
@@ -13,6 +19,12 @@ export class SessionService implements OnModuleInit {
   private lastViewerMap = new Map<string, number>(); // sessionId → timestamp
   /** 内存中维护的去重加入数，session 结束时持久化。 */
   private joinCountMap = new Map<string, number>(); // sessionId → count
+  /** sessionId → viewerId → 连接引用计数和当前计费区间。 */
+  private viewerPresenceMap = new Map<string, Map<string, ViewerPresence>>();
+  /** 已结算到数据库的累计观众毫秒。 */
+  private viewerDurationMsMap = new Map<string, number>();
+  /** 当前进程中已经计入 totalViewerJoins 的 viewerId。 */
+  private viewerIdsMap = new Map<string, Set<string>>();
 
   constructor(
     private readonly db: DatabaseService,
@@ -38,6 +50,7 @@ export class SessionService implements OnModuleInit {
       viewerCount: row.viewerCount,
       peakViewers: row.peakViewers,
       totalViewerJoins: row.totalViewerJoins,
+      viewerDurationMs: row.viewerDurationMs,
       quality: row.quality,
       cardMessageId: row.cardMessageId || undefined,
       manualCreated: !!row.manualCreated,
@@ -68,6 +81,7 @@ export class SessionService implements OnModuleInit {
       viewerCount: session.viewerCount,
       peakViewers: session.peakViewers,
       totalViewerJoins: session.totalViewerJoins,
+      viewerDurationMs: session.viewerDurationMs,
       quality: session.quality,
       cardMessageId: session.cardMessageId || null,
       manualCreated: session.manualCreated ? 1 : 0,
@@ -128,6 +142,7 @@ export class SessionService implements OnModuleInit {
       viewerCount: 0,
       peakViewers: 0,
       totalViewerJoins: 0,
+      viewerDurationMs: 0,
       quality: params.quality || '1080p_2',
       manualCreated: params.manualCreated || false,
       createdAt: now,
@@ -202,6 +217,7 @@ export class SessionService implements OnModuleInit {
     if (!session.startedAt) {
       session.startedAt = Date.now();
     }
+    this.resumeViewerBilling(session.id, session.lastHeartbeat);
 
     const dbRow = this.db.getSessionByToken(token);
     if (dbRow) {
@@ -255,6 +271,7 @@ export class SessionService implements OnModuleInit {
       session.status = SessionStatus.ACTIVE;
       session.graceStartedAt = null;
       session.graceReason = null;
+      this.resumeViewerBilling(session.id, session.lastHeartbeat);
       this.logger.log('session ' + session.id + ' reconnected within grace');
     }
 
@@ -277,6 +294,7 @@ export class SessionService implements OnModuleInit {
     const session = this.getByToken(token);
     if (!session || session.status === SessionStatus.ENDED) return undefined;
     const now = Date.now();
+    this.pauseViewerBilling(session.id, now);
     session.status = SessionStatus.GRACE;
     session.graceReason = 'stopped';
     session.graceStartedAt = now;
@@ -307,45 +325,145 @@ export class SessionService implements OnModuleInit {
     return session;
   }
 
-  /**
-   * SSE 控制器调用：同步观众指标到 DB 和内存 Map，并通过 EventBus 推送状态。
-   * @param sessionId 会话 ID
-   * @param viewerCount 当前实时观众数（由 SSE 控制器 countViewers 提供）
-   * @param isJoin true=观众加入，false=观众离开
-   */
-  updateViewerMetrics(sessionId: string, viewerCount: number, isJoin: boolean): void {
+  /** SSE 观众连接。相同 viewerId 的重连或并发连接只计一个观众。 */
+  viewerConnected(sessionId: string, viewerId: string): void {
     const session = this.getById(sessionId);
-    if (!session) return;
+    if (!session || session.status === SessionStatus.ENDED) return;
+    const now = Date.now();
+    let viewers = this.viewerPresenceMap.get(sessionId);
+    if (!viewers) {
+      viewers = new Map();
+      this.viewerPresenceMap.set(sessionId, viewers);
+    }
+    const existing = viewers.get(viewerId);
+    let isNewViewer = false;
+    if (existing) {
+      existing.connections += 1;
+    } else {
+      viewers.set(viewerId, {
+        connections: 1,
+        billingStartedAt: session.status === SessionStatus.ACTIVE ? now : null,
+      });
+      isNewViewer = true;
+    }
+    this.syncViewerMetrics(session, viewers.size, isNewViewer ? viewerId : undefined);
+  }
 
+  /** SSE 观众断开；最后一条同 viewerId 连接断开时结算本次在线区间。 */
+  viewerDisconnected(sessionId: string, viewerId: string): void {
+    const viewers = this.viewerPresenceMap.get(sessionId);
+    const presence = viewers?.get(viewerId);
+    if (!viewers || !presence) return;
+    presence.connections -= 1;
+    if (presence.connections <= 0) {
+      this.accrueViewerDuration(sessionId, presence, Date.now());
+      viewers.delete(viewerId);
+    }
+    if (viewers.size === 0) this.viewerPresenceMap.delete(sessionId);
+    const session = this.getById(sessionId);
+    if (session && session.status !== SessionStatus.ENDED) {
+      this.syncViewerMetrics(session, viewers.size);
+    }
+  }
+
+  private syncViewerMetrics(session: ShareSession, viewerCount: number, joinedViewerId?: string): void {
     // 更新峰值
     if (viewerCount > session.peakViewers) {
       session.peakViewers = viewerCount;
     }
 
     // 持久化到 DB
-    this.db.updateSession(sessionId, {
+    this.db.updateSession(session.id, {
       viewerCount,
       peakViewers: session.peakViewers,
     });
 
     // 更新 lastViewerMap（用于 watchdog 的 no_viewer_timeout 检测）
     if (viewerCount > 0) {
-      this.lastViewerMap.delete(sessionId);
-    } else if (!this.lastViewerMap.has(sessionId)) {
-      this.lastViewerMap.set(sessionId, Date.now());
+      this.lastViewerMap.delete(session.id);
+    } else if (!this.lastViewerMap.has(session.id)) {
+      this.lastViewerMap.set(session.id, Date.now());
     }
 
-    // 记录去重加入数（用于 endSession 时持久化 totalViewerJoins）
-    if (isJoin) {
-      this.recordViewerJoin(sessionId);
+    // viewerId 去重后记录加入数（用于 endSession 时持久化）
+    if (joinedViewerId) {
+      let ids = this.viewerIdsMap.get(session.id);
+      if (!ids) {
+        ids = new Set();
+        this.viewerIdsMap.set(session.id, ids);
+      }
+      if (!ids.has(joinedViewerId)) {
+        ids.add(joinedViewerId);
+        this.recordViewerJoin(session.id, session.totalViewerJoins);
+      }
     }
 
     // 通过 EventBus 推送状态变更，SSE 控制器监听此事件推给所有客户端
     this.bus.emitSessionStateChanged({
-      sessionId,
+      sessionId: session.id,
       status: session.status,
       viewerCount,
     });
+  }
+
+  private accrueViewerDuration(
+    sessionId: string,
+    presence: ViewerPresence,
+    now: number,
+  ): void {
+    if (presence.billingStartedAt === null) return;
+    const session = this.getById(sessionId);
+    const current = this.viewerDurationMsMap.get(sessionId)
+      ?? session?.viewerDurationMs
+      ?? 0;
+    const next = current + Math.max(0, now - presence.billingStartedAt);
+    this.viewerDurationMsMap.set(sessionId, next);
+    presence.billingStartedAt = null;
+    this.db.updateSession(sessionId, { viewerDurationMs: next });
+  }
+
+  private pauseViewerBilling(sessionId: string, now = Date.now()): void {
+    const viewers = this.viewerPresenceMap.get(sessionId);
+    if (!viewers) return;
+    for (const presence of viewers.values()) {
+      this.accrueViewerDuration(sessionId, presence, now);
+    }
+  }
+
+  private resumeViewerBilling(sessionId: string, now = Date.now()): void {
+    const viewers = this.viewerPresenceMap.get(sessionId);
+    if (!viewers) return;
+    for (const presence of viewers.values()) {
+      if (presence.billingStartedAt === null) presence.billingStartedAt = now;
+    }
+  }
+
+  private getViewerDurationMs(session: ShareSession, now = Date.now()): number | null {
+    const stored = this.viewerDurationMsMap.get(session.id) ?? session.viewerDurationMs;
+    if (stored === null) return null;
+    let total = stored;
+    const viewers = this.viewerPresenceMap.get(session.id);
+    if (viewers) {
+      for (const presence of viewers.values()) {
+        if (presence.billingStartedAt !== null) {
+          total += Math.max(0, now - presence.billingStartedAt);
+        }
+      }
+    }
+    return total;
+  }
+
+  /** 定期落盘活跃观众时长，降低进程异常退出造成的计费误差。 */
+  @Interval(10_000)
+  checkpointViewerDurations(): void {
+    const now = Date.now();
+    for (const sessionId of this.viewerPresenceMap.keys()) {
+      this.pauseViewerBilling(sessionId, now);
+      const session = this.getById(sessionId);
+      if (session?.status === SessionStatus.ACTIVE) {
+        this.resumeViewerBilling(sessionId, now);
+      }
+    }
   }
 
   setCardMessageId(sessionId: string, messageId: string): void {
@@ -353,8 +471,8 @@ export class SessionService implements OnModuleInit {
   }
 
   /** 记录去重加入（仅写内存，session 结束时持久化到 DB） */
-  recordViewerJoin(sessionId: string): void {
-    const current = this.joinCountMap.get(sessionId) || 0;
+  recordViewerJoin(sessionId: string, persistedCount = 0): void {
+    const current = this.joinCountMap.get(sessionId) ?? persistedCount;
     this.joinCountMap.set(sessionId, current + 1);
   }
 
@@ -370,9 +488,11 @@ export class SessionService implements OnModuleInit {
     const ageMs = Date.now() - session.createdAt;
     const endedAt = Date.now();
     const durationMs = session.startedAt ? endedAt - session.startedAt : null;
+    this.pauseViewerBilling(sessionId, endedAt);
+    const viewerDurationMs = this.getViewerDurationMs(session, endedAt);
 
     // 持久化峰值和累计加入数（从内存 Map 取，不再实时写 DB）
-    const totalJoins = this.joinCountMap.get(sessionId) || 0;
+    const totalJoins = this.joinCountMap.get(sessionId) ?? session.totalViewerJoins;
     const peakViewers = session.peakViewers;
 
     this.db.updateSession(sessionId, {
@@ -381,11 +501,15 @@ export class SessionService implements OnModuleInit {
       durationMs,
       totalViewerJoins: totalJoins,
       peakViewers,
+      viewerDurationMs,
     });
 
     // 清理内存 Map
     this.lastViewerMap.delete(sessionId);
     this.joinCountMap.delete(sessionId);
+    this.viewerPresenceMap.delete(sessionId);
+    this.viewerDurationMsMap.delete(sessionId);
+    this.viewerIdsMap.delete(sessionId);
 
     this.bus.emitSessionEnded({
       sessionId: session.id,
@@ -425,7 +549,12 @@ export class SessionService implements OnModuleInit {
 
     // 观众：订阅视频流，按 lowLatency 模式选择互动直播或极速直播视频系数
     const viewerVideoCoeff = getVideoCoefficient(qi.tier, session.lowLatency);
-    const viewerStandardSec = session.peakViewers * durationSec * viewerVideoCoeff;
+    const viewerDurationMs = this.getViewerDurationMs(session);
+    const legacyViewerEstimate = viewerDurationMs === null;
+    const viewerDurationSec = legacyViewerEstimate
+      ? session.peakViewers * durationSec
+      : viewerDurationMs / 1000;
+    const viewerStandardSec = viewerDurationSec * viewerVideoCoeff;
 
     // 标准时长（分钟），向上取整
     const standardMinutes = durationMs
@@ -436,15 +565,17 @@ export class SessionService implements OnModuleInit {
     const estimatedCost = Math.round(standardMinutes * STANDARD_MINUTE_PRICE * 100) / 100;
 
     const durationMin = durationSec / 60;
+    const viewerDurationMin = viewerDurationSec / 60;
     const modeLabel = session.lowLatency ? '互动直播' : '极速直播';
     const billingDetail = durationMs
-      ? `${durationMin.toFixed(1)}分 × (主播音频系数${broadcasterAudioCoeff} + ${session.peakViewers}观众×${modeLabel}视频系数${viewerVideoCoeff}) = ${standardMinutes} 标准分钟`
+      ? legacyViewerEstimate
+        ? `[旧记录估算] ${durationMin.toFixed(1)}主播分×系数${broadcasterAudioCoeff} + ${session.peakViewers}峰值观众×${durationMin.toFixed(1)}分×${modeLabel}系数${viewerVideoCoeff} = ${standardMinutes} 标准分钟`
+        : `${durationMin.toFixed(1)}主播分×系数${broadcasterAudioCoeff} + ${viewerDurationMin.toFixed(1)}累计观众分×${modeLabel}系数${viewerVideoCoeff} = ${standardMinutes} 标准分钟`
       : '-';
 
-    // Get server config for links
     const serverConfig = this.db.getServer(session.guildId);
     const globalCfg = this.db.getGlobalConfig();
-    const publicDomain = serverConfig?.publicDomain || globalCfg.publicDomain;
+    const publicDomain = globalCfg.publicDomain;
 
     let idleRemainingSec: number | undefined;
     const cfg = this.getServerSessionConfig(session.guildId);
@@ -468,7 +599,7 @@ export class SessionService implements OnModuleInit {
     }
 
     // 从内存 Map 取实时 totalViewerJoins（不再实时写 DB）
-    const liveJoins = this.joinCountMap.get(session.id) || 0;
+    const liveJoins = this.joinCountMap.get(session.id) ?? session.totalViewerJoins;
 
     return {
       id: session.id,
@@ -478,6 +609,7 @@ export class SessionService implements OnModuleInit {
       viewerCount: session.viewerCount,
       peakViewers: session.peakViewers,
       totalViewerJoins: liveJoins,
+      viewerDurationMs,
       quality: session.quality,
       shareLink: `${publicDomain.replace(/\/+$/, '')}/share?t=${session.token}`,
       viewLink: `${publicDomain.replace(/\/+$/, '')}/view?t=${session.token}`,
@@ -540,6 +672,7 @@ export class SessionService implements OnModuleInit {
       if (session.status === SessionStatus.ACTIVE) {
         const elapsed = now - session.lastHeartbeat;
         if (elapsed > cfg.heartbeatIntervalSec * 1000 * 3) {
+          this.pauseViewerBilling(session.id, now);
           this.db.updateSession(session.id, {
             status: SessionStatus.GRACE,
             graceReason: 'heartbeat',

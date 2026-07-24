@@ -3,32 +3,12 @@ function escapeMarkdown(s: string): string {
   return s.replace(/([*_\[\]`~\\])/g, '\\$1');
 }
 
-/** 发起共享时回复给用户的共享链接卡片（同时带「开始共享」与「点击观看」按钮） */
+/** 发起共享时仅回复给发起人的临时卡片 */
 export function buildShareLinkCard(opts: {
   sharerUsername: string;
   shareUrl: string;
-  viewUrl?: string;
 }): unknown {
   const safeName = escapeMarkdown(opts.sharerUsername || '用户');
-  const buttons: unknown[] = [
-    {
-      type: 'button',
-      text: { type: 'plain-text', content: '🖥 开始共享' },
-      theme: 'success',
-      click: 'link',
-      value: opts.shareUrl,
-    },
-  ];
-  // 即便共享还没开始，「点击观看」也能在共享开启后直接观看
-  if (opts.viewUrl) {
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain-text', content: '▶ 点击观看' },
-      theme: 'primary',
-      click: 'link',
-      value: opts.viewUrl,
-    });
-  }
   return [
     {
       type: 'card',
@@ -46,13 +26,57 @@ export function buildShareLinkCard(opts: {
           type: 'section',
           text: {
             type: 'kmarkdown',
-            content: '💡 **使用说明**\n• 点击「开始共享」后在浏览器中授权屏幕采集，记得打开声音权限\n• 频道成员可随时点击「点击观看」免登录观看\n• 关闭网页后链接会在短时间内自动失效\n• 无人观看时，一定要及时停止共享，节省服务器费用！',
+            content: '💡 **使用说明**\n• 点击「开始共享」后在浏览器中授权屏幕采集，记得打开声音权限\n• 检测到共享开始后，机器人会在频道发送观看卡片\n• 关闭网页后链接会在短时间内自动失效\n• 无人观看时，请及时停止共享，节省费用',
           },
         },
         { type: 'divider' },
         {
           type: 'action-group',
-          elements: buttons,
+          elements: [
+            {
+              type: 'button',
+              text: { type: 'plain-text', content: '🖥 开始共享' },
+              theme: 'success',
+              click: 'link',
+              value: opts.shareUrl,
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+/** 检测到发布端开始共享后发送到频道的公开观看卡片 */
+export function buildViewingCard(opts: {
+  sharerUsername: string;
+  viewUrl: string;
+}): unknown {
+  const safeName = escapeMarkdown(opts.sharerUsername || '用户');
+  return [
+    {
+      type: 'card',
+      theme: 'success',
+      size: 'lg',
+      modules: [
+        {
+          type: 'section',
+          text: {
+            type: 'kmarkdown',
+            content: `**屏幕共享已开始** 🐑\n${safeName} 正在共享屏幕`,
+          },
+        },
+        {
+          type: 'action-group',
+          elements: [
+            {
+              type: 'button',
+              text: { type: 'plain-text', content: '▶ 点击观看' },
+              theme: 'primary',
+              click: 'link',
+              value: opts.viewUrl,
+            },
+          ],
         },
       ],
     },

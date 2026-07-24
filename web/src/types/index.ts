@@ -8,6 +8,8 @@ export interface SessionInfo {
   viewerCount: number;
   peakViewers: number;
   totalViewerJoins: number;
+  /** 所有观众在实际共享期间的累计在线毫秒；null 表示旧记录 */
+  viewerDurationMs: number | null;
   quality: string;
   shareLink: string;
   viewLink: string;
@@ -22,6 +24,10 @@ export interface SessionInfo {
   /** 预估费用（元） */
   estimatedCost: number;
   allowedQualities?: string[];
+  qualityBitrates?: Record<string, {
+    bitrateMin?: number;
+    bitrateMax?: number;
+  }>;
   publisherClientId?: string;
   idleRemainingSec?: number;
   noViewerRemainingSec?: number;

@@ -20,6 +20,8 @@ export interface ShareSession {
   viewerCount: number;
   peakViewers: number;
   totalViewerJoins: number;
+  /** 所有观众在 ACTIVE 状态下的累计在线毫秒；null 表示旧记录 */
+  viewerDurationMs: number | null;
   quality: string;
   cardMessageId?: string;
   manualCreated: boolean;
@@ -101,6 +103,8 @@ export interface SessionInfo {
   viewerCount: number;
   peakViewers: number;
   totalViewerJoins: number;
+  /** 所有观众的实际累计观看毫秒；null 表示旧记录无法精确统计 */
+  viewerDurationMs: number | null;
   quality: string;
   shareLink: string;
   viewLink: string;
@@ -140,8 +144,8 @@ export interface QualityInfo {
   width: number;
   height: number;
   frameRate: number;
-  bitrateMin: number;
-  bitrateMax: number;
+  bitrateMin?: number;
+  bitrateMax?: number;
   resolution: number;
   tier: string;
   coefficient: number;
@@ -163,35 +167,50 @@ export const QUALITY_PRESETS: QualityInfo[] = [
   {
     key: '1080p_2',
     label: '1080P 30fps',
-    width: 1920, height: 1080, frameRate: 30, bitrateMin: 2000, bitrateMax: 5000,
+    width: 1920, height: 1080, frameRate: 30, bitrateMin: 2000,
     resolution: 1920 * 1080, tier: 'Full HD 全高清', coefficient: 9,
   },
   {
     key: '1080p60',
     label: '1080P 60fps',
-    width: 1920, height: 1080, frameRate: 60, bitrateMin: 4000, bitrateMax: 8000,
+    width: 1920, height: 1080, frameRate: 60, bitrateMin: 2000,
     resolution: 1920 * 1080, tier: 'Full HD 全高清', coefficient: 9,
   },
   {
     key: '1440p30',
     label: '2K 30fps',
-    width: 2560, height: 1440, frameRate: 30, bitrateMin: 4000, bitrateMax: 10000,
+    width: 2560, height: 1440, frameRate: 30, bitrateMin: 2000,
     resolution: 2560 * 1440, tier: '2K', coefficient: 16,
   },
   {
     key: '1440p60',
     label: '2K 60fps',
-    width: 2560, height: 1440, frameRate: 60, bitrateMin: 6000, bitrateMax: 15000,
+    width: 2560, height: 1440, frameRate: 60, bitrateMin: 2000,
     resolution: 2560 * 1440, tier: '2K', coefficient: 16,
   },
   {
     key: '4k30',
     label: '4K 30fps',
-    width: 3840, height: 2160, frameRate: 30, bitrateMin: 8000, bitrateMax: 20000,
+    width: 3840, height: 2160, frameRate: 30, bitrateMin: 2000,
     resolution: 3840 * 2160, tier: '2K+ 超高清', coefficient: 36,
   },
 ];
 
 export function getQualityInfo(key: string): QualityInfo {
   return QUALITY_PRESETS.find((q) => q.key === key) || QUALITY_PRESETS[2];
+}
+
+export type QualityBitrateConfig = Record<string, {
+  bitrateMin?: number;
+  bitrateMax?: number;
+}>;
+
+export function getDefaultQualityBitrates(): QualityBitrateConfig {
+  return Object.fromEntries(QUALITY_PRESETS.map(({ key, bitrateMin, bitrateMax }) => [
+    key,
+    {
+      ...(bitrateMin !== undefined ? { bitrateMin } : {}),
+      ...(bitrateMax !== undefined ? { bitrateMax } : {}),
+    },
+  ]));
 }

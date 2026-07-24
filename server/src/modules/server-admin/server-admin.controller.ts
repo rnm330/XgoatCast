@@ -6,12 +6,14 @@ import {
   Body,
   Param,
   Query,
+  BadRequestException,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import * as bcrypt from 'bcryptjs';
 import { createHmac } from 'crypto';
+import { QUALITY_PRESETS } from '../session/session.types';
 import {
   ServerAdminLoginDto,
   UpdateServerConfigDto,
@@ -110,10 +112,12 @@ export class ServerAdminController {
       agoraAppCertificate: server.agoraAppCertificate ? '******' : '',
       agoraTokenExpireSec: server.agoraTokenExpireSec,
       allowedQualities: JSON.parse(server.allowedQualities),
+      triggerWordLabels: this.db.getGlobalConfig().triggerWordLabels,
+      enabledTriggerWords: server.triggerWords.split(',').map(word => word.trim()).filter(Boolean),
       idleTimeoutSec: server.idleTimeoutSec,
       heartbeatIntervalSec: server.heartbeatIntervalSec,
       noViewerTimeoutSec: server.noViewerTimeoutSec,
-      publicDomain: server.publicDomain,
+      publicDomain: this.db.getGlobalConfig().publicDomain,
       allowLowLatency: server.allowLowLatency,
     };
   }
@@ -129,11 +133,21 @@ export class ServerAdminController {
       updates.agoraAppCertificate = dto.agoraAppCertificate;
     }
     if (dto.agoraTokenExpireSec !== undefined) updates.agoraTokenExpireSec = dto.agoraTokenExpireSec;
-    if (dto.allowedQualities !== undefined) updates.allowedQualities = JSON.stringify(dto.allowedQualities);
+    if (dto.allowedQualities !== undefined) {
+      const validKeys = new Set(QUALITY_PRESETS.map(quality => quality.key));
+      const allowed = [...new Set(dto.allowedQualities.filter(key => validKeys.has(key)))];
+      if (allowed.length === 0) throw new BadRequestException('至少开放一个有效画质');
+      updates.allowedQualities = JSON.stringify(allowed);
+    }
+    if (dto.enabledTriggerWords !== undefined) {
+      const allowed = new Set(this.db.getGlobalConfig().triggerWordLabels);
+      const enabled = [...new Set(dto.enabledTriggerWords.map(word => word.trim()).filter(word => allowed.has(word)))];
+      if (enabled.length === 0) throw new BadRequestException('至少启用一个触发词标签');
+      updates.triggerWords = enabled.join(',');
+    }
     if (dto.idleTimeoutSec !== undefined) updates.idleTimeoutSec = dto.idleTimeoutSec;
     if (dto.heartbeatIntervalSec !== undefined) updates.heartbeatIntervalSec = dto.heartbeatIntervalSec;
     if (dto.noViewerTimeoutSec !== undefined) updates.noViewerTimeoutSec = dto.noViewerTimeoutSec;
-    if (dto.publicDomain !== undefined) updates.publicDomain = dto.publicDomain;
     if (dto.allowLowLatency !== undefined) updates.allowLowLatency = dto.allowLowLatency;
 
     this.db.updateServer(serverId, updates);

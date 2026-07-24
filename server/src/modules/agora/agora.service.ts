@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { RtcTokenBuilder, RtcRole } from 'agora-token';
 import { DatabaseService } from '../database/database.service';
 import { AgoraRole, AgoraTokenResponse } from './agora.types';
+import { QUALITY_PRESETS } from '../session/session.types';
 
 @Injectable()
 export class AgoraService {
@@ -45,12 +46,17 @@ export class AgoraService {
 
   /** Get allowed qualities for a server */
   getAllowedQualities(serverId?: string): string[] {
-    if (serverId) {
-      const server = this.db.getServer(serverId);
-      if (server) {
-        return JSON.parse(server.allowedQualities);
-      }
+    if (!serverId) return [];
+    const server = this.db.getServer(serverId);
+    if (!server || !server.bound || server.status !== 'active') return [];
+    try {
+      const parsed = JSON.parse(server.allowedQualities);
+      if (!Array.isArray(parsed)) return [];
+      const validKeys = new Set(QUALITY_PRESETS.map(quality => quality.key));
+      return [...new Set(parsed.filter((key): key is string => typeof key === 'string' && validKeys.has(key)))];
+    } catch {
+      this.logger.warn(`Invalid allowed qualities for server ${serverId}`);
+      return [];
     }
-    return ['480p_2', '720p30', '1080p_2', '1080p60', '1440p30', '1440p60', '4k30'];
   }
 }

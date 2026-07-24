@@ -25,8 +25,8 @@ export interface QualityOption {
     width: number;
     height: number;
     frameRate: number;
-    bitrateMin: number;
-    bitrateMax: number;
+    bitrateMin?: number;
+    bitrateMax?: number;
   };
 }
 
@@ -45,27 +45,27 @@ export const QUALITY_OPTIONS: QualityOption[] = [
   {
     key: '1080p_2',
     label: '1080P 30fps',
-    encoderConfig: { width: 1920, height: 1080, frameRate: 30, bitrateMin: 2000, bitrateMax: 5000 },
+    encoderConfig: { width: 1920, height: 1080, frameRate: 30, bitrateMin: 2000 },
   },
   {
     key: '1080p60',
     label: '1080P 60fps',
-    encoderConfig: { width: 1920, height: 1080, frameRate: 60, bitrateMin: 4000, bitrateMax: 8000 },
+    encoderConfig: { width: 1920, height: 1080, frameRate: 60, bitrateMin: 2000 },
   },
   {
     key: '1440p30',
     label: '2K 30fps',
-    encoderConfig: { width: 2560, height: 1440, frameRate: 30, bitrateMin: 4000, bitrateMax: 10000 },
+    encoderConfig: { width: 2560, height: 1440, frameRate: 30, bitrateMin: 2000 },
   },
   {
     key: '1440p60',
     label: '2K 60fps',
-    encoderConfig: { width: 2560, height: 1440, frameRate: 60, bitrateMin: 6000, bitrateMax: 15000 },
+    encoderConfig: { width: 2560, height: 1440, frameRate: 60, bitrateMin: 2000 },
   },
   {
     key: '4k30',
     label: '4K 30fps',
-    encoderConfig: { width: 3840, height: 2160, frameRate: 30, bitrateMin: 8000, bitrateMax: 20000 },
+    encoderConfig: { width: 3840, height: 2160, frameRate: 30, bitrateMin: 2000 },
   },
 ];
 
@@ -95,6 +95,10 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
     async (opts: {
       qualityKey?: string;
       lowLatency: boolean;
+      bitrateConfig?: {
+        bitrateMin?: number;
+        bitrateMax?: number;
+      };
     }) => {
       setError('');
       try {
@@ -108,11 +112,21 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         // 2. 先创建屏幕共享轨道（用户选择窗口）
         const qKey = opts.qualityKey || '1080p_2';
         const qOpt = QUALITY_OPTIONS.find((q) => q.key === qKey) || QUALITY_OPTIONS[2];
+        const {
+          bitrateMin: _defaultBitrateMin,
+          bitrateMax: _defaultBitrateMax,
+          ...baseEncoderConfig
+        } = qOpt.encoderConfig;
+        // 新版服务端会明确返回该档位的码率对象；空对象表示上下限均不传。
+        // bitrateConfig 缺失时才回退到前端默认值，以兼容尚未升级的服务端。
+        const encoderConfig = opts.bitrateConfig === undefined
+          ? qOpt.encoderConfig
+          : { ...baseEncoderConfig, ...opts.bitrateConfig };
         const screenTrack = await AgoraRTC.createScreenVideoTrack(
           {
-            encoderConfig: qOpt.encoderConfig,
-            // 默认（极速直播）：detail 画质优先；低延迟：motion 流畅优先（弱网降分辨率保帧率）
-            optimizationMode: opts.lowLatency ? 'motion' : 'detail',
+            encoderConfig,
+            // 两种模式均流畅优先：弱网时允许降低码率或分辨率以尽量保持帧率。
+            optimizationMode: 'motion',
           },
           // ScreenAudioTrackInitConfig：关 3A 保真多声道 + restrictOwnAudio 防回声
           {
@@ -136,7 +150,7 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         if (screenAudioRef.current) tracks.push(screenAudioRef.current);
 
         // 3. 用户已选择窗口，现在连接服务器
-        // 极速直播（默认）：mode:'live' + host 角色，观众端用 audience+level:1 低延时 1.5-2s，detail 画质优先
+        // 极速直播（默认）：mode:'live' + host 角色，观众端用 audience+level:1，motion 流畅优先
         // 低延迟模式：mode:'rtc'，超低延时 400-800ms，motion 流畅优先
         const client = opts.lowLatency
           ? AgoraRTC.createClient({ mode: 'rtc', codec: 'h264' })
