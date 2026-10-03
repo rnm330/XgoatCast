@@ -1,9 +1,11 @@
 {
   "name": "server",
-  "version": "0.1.0",
+  "version": "0.0.1-beta.1",
   "private": true,
   "scripts": {
-    "build": "nest build",
+    "build": "nest build && node ../scripts/export-email-template.cjs",
+    "test": "node --require ts-node/register --test test/*.spec.ts",
+    "test:kook-isolation": "node --require ts-node/register --test test/platform-registry.spec.ts test/kook-isolation.spec.ts",
     "start": "node dist/main.js",
     "start:prod": "node dist/main.js"
   },
@@ -19,9 +21,14 @@
     "class-validator": "^0.14.1",
     "dotenv": "^17.4.2",
     "helmet": "^8.3.0",
+    "json-bigint": "^1.0.0",
+    "nodemailer": "^10.0.11",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "sanitize-html": "2.17.0"
+    "sanitize-html": "2.17.0",
+    "svg-captcha": "^1.4.0",
+    "tencentcloud-sdk-nodejs-ses": "^4.1.271",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.2",
@@ -29,6 +36,7 @@
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.10",
     "@types/sanitize-html": "^2.16.1",
+    "@types/ws": "^8.18.1",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.5.3"

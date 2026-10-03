@@ -1,7 +1,18 @@
-import { IsString, IsOptional, IsArray, IsNumber, Min } from 'class-validator';
+import {
+  IsString,
+  IsIn,
+  IsOptional,
+  IsArray,
+  IsNumber,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator';
 
 export class BindServerDto {
   @IsString()
+  @MinLength(8)
+  @MaxLength(128)
   password!: string;
 
   @IsOptional()
@@ -16,17 +27,16 @@ export class ServerAdminLoginDto {
 
 export class UpdateServerConfigDto {
   @IsOptional()
+  @IsIn([0, 1])
+  allowQualityPreference?: number;
+
+  @IsOptional()
   @IsString()
   agoraAppId?: string;
 
   @IsOptional()
   @IsString()
   agoraAppCertificate?: string;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(60)
-  agoraTokenExpireSec?: number;
 
   @IsOptional()
   @IsArray()
@@ -37,19 +47,14 @@ export class UpdateServerConfigDto {
   @IsString({ each: true })
   enabledTriggerWords?: string[];
 
+  // 心跳间隔与声网令牌有效期由超管设置，不接受空间管理员提交。
+  // 超时数值在控制器中钳制到 10～600 秒，不做拒绝式校验。
   @IsOptional()
   @IsNumber()
-  @Min(10)
   idleTimeoutSec?: number;
 
   @IsOptional()
   @IsNumber()
-  @Min(2)
-  heartbeatIntervalSec?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(30)
   noViewerTimeoutSec?: number;
 
   @IsOptional()

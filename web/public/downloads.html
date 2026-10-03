@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>客户端发布 · Xgoat.Cast 屏幕共享</title>
+  <style>
+    :root{color-scheme:light;font-family:"Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;background:#f4f4f1;color:#20211f}
+    *{box-sizing:border-box}body{margin:0;background:#f4f4f1}a{color:#a94004;text-decoration:none}a:hover{text-decoration:underline}a,button{touch-action:manipulation}a:focus-visible,button:focus-visible{outline:2px solid #bd4c0d;outline-offset:4px}::selection{background:#ffd6c3}
+    nav,main,footer{width:100%;max-width:1280px;margin-inline:auto;padding-inline:32px}
+    header{border-bottom:1px solid #d9ddd6;background:#fbfbf8}nav{padding-block:22px;display:flex;justify-content:space-between}.brand{font-weight:600;color:#20211f}
+    main{padding-block:48px}h1{font-size:clamp(32px,6vw,50px);letter-spacing:-1px;margin:12px 0 16px}.intro{color:#5b5e59;line-height:1.8}
+    .card{margin-top:32px;padding:28px;background:#fffefd;border:1px solid #d9ddd6;border-radius:12px;overflow-wrap:anywhere}.meta{color:#5b5e59;font-size:14px}.badge{display:inline-block;margin-left:8px;padding:4px 10px;border-radius:6px;background:#ffd6c3;color:#a94004}h2{margin:14px 0 8px;font-size:24px}h2.instructions-title{margin:32px 0 12px;font-size:18px;font-weight:550}.notes{color:#5b5e59;line-height:1.8;white-space:normal}.notes p{margin:12px 0}.notes ul{margin:12px 0;padding-left:22px}.notes li{margin:6px 0}.download{display:inline-block;margin-top:20px;padding:13px 18px;border-radius:6px;background:#ff6014;color:#20211f;font-weight:550}.download:hover{background:#f37130;text-decoration:none}.checksum{font-size:12px;color:#5b5e59;word-break:break-all;margin-top:18px}.instructions{color:#5b5e59;line-height:1.8;padding-left:22px}.instructions li{padding-left:4px;margin:8px 0}button{font:inherit;cursor:pointer;border:1px solid #cbd0c7;border-radius:6px;padding:10px 16px;background:#fffefd;color:#20211f}button:hover{background:#e8ebe5}footer{padding-bottom:48px;color:#5b5e59;font-size:12px}@media(max-width:480px){nav,main,footer{padding-inline:20px}main{padding-block:36px}.card{padding:20px}nav{padding-block:18px}}
+    .history-entry{border-bottom:1px solid #d9ddd6;padding:16px 0}.history-entry summary{cursor:pointer;min-height:32px;line-height:1.8}.history-entry summary span{margin-left:8px}.history-entry time{float:right}.history-entry .notes{padding:16px 0 8px}.history-entry summary:focus-visible{outline:2px solid #bd4c0d;outline-offset:4px}#release-history{overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <header><nav><a class="brand" href="/">Xgoat.Cast</a><a href="/updates.html">更新日志 ↗</a></nav></header>
+  <main><h1>客户端发布</h1><p class="intro">下载 XgoatCast Windows 客户端，通过网页发起共享，在客户端选择屏幕、窗口和声音。新版本会在客户端中提示，更新时回到这里下载。</p>
+    <section class="card" id="release" aria-live="polite" aria-busy="true"><p>正在读取最新版本…</p></section>
+    <section aria-labelledby="history-heading"><h2 id="history-heading" class="instructions-title">历史版本</h2><div id="release-history"><p class="meta">正在读取历史更新…</p></div></section>
+    <h2 class="instructions-title">下载后，回到共享页开始</h2>
+    <ol class="instructions"><li>下载安装包后直接运行，按提示安装 XgoatCast。</li><li>回到共享网页，点击「使用 Windows 客户端共享」，在浏览器提示中允许打开 XgoatCast。</li><li>在客户端选择窗口或屏幕，确认声音和画质后开始共享。若无法唤起，在客户端菜单中启用网页唤起，再重试。</li></ol>
+    <p class="intro">更新客户端前，请先停止正在进行的共享，再退出旧客户端并运行新版安装包。</p>
+  </main>
+  <footer>Xgoat.Cast · Windows x64</footer>
+  <noscript><p>请启用 JavaScript 读取最新版本和下载链接。</p></noscript>
+  <script src="/downloads.js" defer></script>
+</body>
+</html>

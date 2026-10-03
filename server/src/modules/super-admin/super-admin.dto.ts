@@ -1,4 +1,13 @@
-import { IsString, IsOptional, IsArray, IsNumber, IsObject, Min } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsArray,
+  IsNumber,
+  IsObject,
+  Matches,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import type { QualityBitrateConfig } from '../session/session.types';
 
 export class SuperAdminLoginDto {
@@ -18,6 +27,16 @@ export class UpdateGlobalConfigDto {
   @IsOptional()
   @IsString()
   kookEncryptKey?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\d*$/)
+  heychatBotId?: string;
+
+  @IsOptional()
+  @IsString()
+  heychatBotToken?: string;
 
   @IsOptional()
   @IsString()
@@ -44,7 +63,6 @@ export class UpdateServerDto {
 
   @IsOptional()
   @IsNumber()
-  @Min(60)
   agoraTokenExpireSec?: number;
 
   @IsOptional()
@@ -56,19 +74,17 @@ export class UpdateServerDto {
   @IsString({ each: true })
   enabledTriggerWords?: string[];
 
+  // 数值字段在控制器中钳制到合理边界（令牌 60～86400，心跳 2～60，超时 10～600）。
   @IsOptional()
   @IsNumber()
-  @Min(10)
   idleTimeoutSec?: number;
 
   @IsOptional()
   @IsNumber()
-  @Min(2)
   heartbeatIntervalSec?: number;
 
   @IsOptional()
   @IsNumber()
-  @Min(30)
   noViewerTimeoutSec?: number;
 
   /** 是否允许共享者开启低延迟模式（1=允许，0=不允许） */

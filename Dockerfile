@@ -14,6 +14,7 @@ RUN apk add --no-cache --virtual .build-deps python3 make g++ && \
     npm config set registry https://registry.npmmirror.com && \
     npm ci --omit=dev --workspace server --include-workspace-root=false \
       --no-audit --no-fund && \
+    npm install --omit=dev --no-save json-bigint@1.0.0 --no-audit --no-fund && \
     npm rebuild better-sqlite3 --workspace server && \
     npm cache clean --force && \
     apk del .build-deps
@@ -27,6 +28,6 @@ VOLUME ["/app/data"]
 EXPOSE 3520
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q -O /dev/null http://localhost:3520/ || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:3520/ || exit 1
 
 CMD ["node", "server/dist/main.js"]

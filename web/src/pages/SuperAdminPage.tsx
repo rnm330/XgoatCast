@@ -1,3 +1,5 @@
+import PanelsPanel from '../components/super-admin/PanelsPanel';
+import MailSettingsPanel from '../components/super-admin/MailSettingsPanel';
 import { useEffect, useState } from 'react';
 import {
   Bell,
@@ -5,7 +7,10 @@ import {
   ChevronUp,
   Edit3,
   ExternalLink,
+  LayoutDashboard,
+  ListChecks,
   LogOut,
+  MonitorUp,
   Plus,
   RefreshCw,
   Server,
@@ -14,23 +19,32 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { api, getSuperAdminToken, clearSuperAdminToken } from '../lib/api';
+import { api, getSuperAdminToken, clearSuperAdminToken, type Platform } from '../lib/api';
 import { cn } from '../lib/utils';
+import DashboardPanel, { type DashboardRecordTarget } from '../components/super-admin/DashboardPanel';
+import RecordsPanel from '../components/super-admin/RecordsPanel';
+import { PlatformBadge } from '../components/super-admin/PlatformBadge';
+import { QqSettingsPanel } from '../components/super-admin/QqSettingsPanel';
 
-type Tab = 'config' | 'kook' | 'notices';
+type Tab = 'dashboard' | 'records' | 'config' | 'spaces' | 'notices' | 'panels';
 type ServerDetailTab = 'events' | 'sessions';
+type SpaceTarget = { platform: Platform; externalId: string };
 
 const TABS: { id: Tab; label: string; icon: typeof Settings }[] = [
+  { id: 'dashboard', label: '数据看板', icon: LayoutDashboard },
+  { id: 'records', label: '统计记录', icon: ListChecks },
   { id: 'config', label: '全局配置', icon: Settings },
-  { id: 'kook', label: 'KOOK 服务器', icon: Server },
+  { id: 'panels', label: '自建面板', icon: Server },
+  { id: 'spaces', label: '平台空间', icon: Server },
   { id: 'notices', label: '通知管理', icon: Bell },
 ];
 
 export default function SuperAdminPage() {
   const [authed, setAuthed] = useState(!!getSuperAdminToken());
   const [checking, setChecking] = useState(!!getSuperAdminToken());
-  const [tab, setTab] = useState<Tab>('config');
-  const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('dashboard');
+  const [selectedSpace, setSelectedSpace] = useState<SpaceTarget | null>(null);
+  const [recordTarget, setRecordTarget] = useState<DashboardRecordTarget | null>(null);
 
   useEffect(() => {
     if (!authed) return;
@@ -60,28 +74,32 @@ export default function SuperAdminPage() {
     setAuthed(false);
   };
 
-  const handleServerSelect = (serverId: string) => {
-    setSelectedServerId(serverId);
+  const handleServerSelect = (space: SpaceTarget) => {
+    setSelectedSpace(space);
   };
 
   const handleBackToList = () => {
-    setSelectedServerId(null);
+    setSelectedSpace(null);
+  };
+
+  const handleOpenRecords = (target: DashboardRecordTarget) => {
+    setRecordTarget(target);
+    setSelectedSpace(null);
+    setTab('records');
   };
 
   return (
-    <div className="min-h-screen flex">
-      <aside className="fixed left-0 top-0 bottom-0 w-60 glass-strong flex flex-col py-6 px-4 z-10">
-        <div className="flex items-center gap-3 px-2 mb-8">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-dark to-brand flex items-center justify-center text-xl">
-            🐑
-          </div>
+    <div className="min-h-screen lg:flex">
+      <aside className="w-full lg:w-60 lg:fixed lg:left-0 lg:top-0 lg:bottom-0 glass-strong flex lg:flex-col gap-4 lg:gap-0 px-4 py-4 lg:py-6 z-10">
+        <div className="flex shrink-0 items-center gap-3 px-2 lg:mb-8">
+          <div className="w-10 h-10 rounded-xl bg-brand flex items-center justify-center"><MonitorUp size={23} strokeWidth={1.7} /></div>
           <div>
             <p className="font-bold text-sm leading-tight">Xgoat.Cast</p>
             <p className="text-xs text-dim">超级管理后台</p>
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1">
+        <nav className="flex flex-1 items-center gap-1 overflow-x-auto lg:block lg:space-y-1">
           {TABS.map((t) => {
             const Icon = t.icon;
             return (
@@ -89,10 +107,11 @@ export default function SuperAdminPage() {
                 key={t.id}
                 onClick={() => {
                   setTab(t.id);
-                  setSelectedServerId(null);
+                  setSelectedSpace(null);
+                  if (t.id !== 'records') setRecordTarget(null);
                 }}
                 className={cn(
-                  'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors',
+                  'shrink-0 lg:w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors',
                   tab === t.id
                     ? 'bg-brand/15 text-brand-light'
                     : 'text-muted hover:text-white hover:bg-white/5',
@@ -108,7 +127,7 @@ export default function SuperAdminPage() {
         <div className="space-y-1">
           <button
             onClick={handleLogout}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-muted hover:text-red-300 hover:bg-red-500/10 transition-colors"
+            className="shrink-0 flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-muted hover:text-red-300 hover:bg-red-500/10 transition-colors"
           >
             <LogOut className="w-4 h-4" />
             退出登录
@@ -116,20 +135,23 @@ export default function SuperAdminPage() {
         </div>
       </aside>
 
-      <main className="flex-1 ml-60 p-8">
+      <main className="min-w-0 flex-1 p-4 sm:p-6 lg:ml-60 lg:p-8">
         <div className="mb-6">
           <h1 className="text-2xl font-bold gradient-text">
-            {selectedServerId ? '服务器详情' : TABS.find((t) => t.id === tab)?.label}
+            {selectedSpace ? '空间详情' : TABS.find((t) => t.id === tab)?.label}
           </h1>
         </div>
 
-        {tab === 'config' && <GlobalConfigPanel />}
-        {tab === 'kook' && !selectedServerId && (
+        {tab === 'dashboard' && <DashboardPanel onOpenRecords={handleOpenRecords} />}
+        {tab === 'records' && <RecordsPanel initialTarget={recordTarget} />}
+        {tab === 'config' && <div className="space-y-6"><QqSettingsPanel /><GlobalConfigPanel /><MailSettingsPanel /></div>}
+        {tab === 'spaces' && !selectedSpace && (
           <ServerListPanel onSelectServer={handleServerSelect} />
         )}
-        {tab === 'kook' && selectedServerId && (
-          <ServerDetailPanel serverId={selectedServerId} onBack={handleBackToList} />
+        {tab === 'spaces' && selectedSpace && (
+          <ServerDetailPanel space={selectedSpace} onBack={handleBackToList} />
         )}
+        {tab === 'panels' && <PanelsPanel />}
         {tab === 'notices' && <NoticeManagementPanel />}
       </main>
     </div>
@@ -166,9 +188,7 @@ function SuperLoginForm({ onSuccess }: { onSuccess: () => void }) {
     <div className="min-h-screen flex items-center justify-center p-4">
       <form onSubmit={handleSubmit} className="glass rounded-2xl p-8 w-full max-w-sm">
         <div className="text-center mb-6">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-dark to-brand flex items-center justify-center text-2xl mx-auto mb-3">
-            🐑
-          </div>
+          <div className="w-14 h-14 rounded-2xl bg-brand flex items-center justify-center mx-auto mb-3"><MonitorUp size={28} strokeWidth={1.7} /></div>
           <h1 className="text-xl font-bold">超级管理后台</h1>
           <p className="text-xs text-muted mt-1">Xgoat.Cast Super Admin</p>
         </div>
@@ -199,19 +219,38 @@ function SuperLoginForm({ onSuccess }: { onSuccess: () => void }) {
 
 function GlobalConfigPanel() {
   const [config, setConfig] = useState<any>(null);
+  const [initialHeychat, setInitialHeychat] = useState({ botId: '', tokenConfigured: false });
+  const [heychatStatus, setHeychatStatus] = useState<any>(null);
   const [newTriggerWord, setNewTriggerWord] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    api.getSuperConfig().then(setConfig);
+    api.getSuperConfig().then((value) => {
+      setConfig(value);
+      setInitialHeychat({ botId: value.heychatBotId || '', tokenConfigured: value.heychatBotToken === '******' });
+    });
+    api.getHeychatStatus().then(setHeychatStatus).catch(() => {});
   }, []);
 
   const handleSave = async () => {
     if (!config) return;
     setSaving(true);
     try {
+      const shouldReloadHeychat = config.heychatBotToken !== '******'
+        || config.heychatBotId !== initialHeychat.botId;
       await api.updateSuperConfig(config);
+      if (shouldReloadHeychat) {
+        const status = await api.syncHeychat();
+        if (!status.ok) throw new Error(status.sync?.error || '小黑盒同步失败');
+        const latest = await api.getHeychatStatus();
+        setHeychatStatus((current: any) => ({
+          ...current,
+          ...latest,
+          rooms: status.rooms,
+        }));
+        setConfig((current: any) => ({ ...current, heychatBotToken: '******' }));
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {
@@ -294,6 +333,67 @@ function GlobalConfigPanel() {
             </p>
             <p className="mt-2 text-amber-300">修改 Bot Token 后需要重启服务；Verify Token 和 Encrypt Key 保存后立即用于回调校验。</p>
           </div>
+        </div>
+      </div>
+
+      <div className="glass rounded-2xl p-5">
+        <h3 className="font-semibold text-white">小黑盒机器人</h3>
+        <p className="text-xs text-muted mb-4 mt-0.5">
+          独立 WebSocket 接入；保存新令牌后会热重连并同步已加入的房间
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-muted mb-1 block">机器人 ID</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={config.heychatBotId || ''}
+              onChange={(e) => setConfig({ ...config, heychatBotId: e.target.value.replace(/\D/g, '') })}
+              placeholder="开发者后台中的机器人 ID"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-muted mb-1 block">机器人令牌</label>
+            <input
+              type="password"
+              value={config.heychatBotToken || ''}
+              onChange={(e) => setConfig({ ...config, heychatBotToken: e.target.value })}
+              placeholder="已配置则显示 ******"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder:text-dim focus:outline-none focus:border-brand/50"
+            />
+          </div>
+          <div className="rounded-lg bg-white/5 px-3.5 py-3 text-xs text-muted flex items-center justify-between gap-3">
+            <div>
+              <p>
+                状态：
+                <span className={heychatStatus?.websocket?.connected ? 'text-green-300' : 'text-yellow-300'}>
+                  {heychatStatus?.websocket?.connected ? ' WebSocket 已连接' : heychatStatus?.configured ? ' 待连接' : ' 未配置'}
+                </span>
+              </p>
+              <p className="mt-1">已同步房间：{heychatStatus?.rooms ?? 0}</p>
+              <p className="mt-1">卡片待补发：{heychatStatus?.cardDelivery?.pending ?? 0}；待核查：{(heychatStatus?.cardDelivery?.uncertain ?? 0) + (heychatStatus?.cardDelivery?.failed ?? 0)}</p>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const status = await api.syncHeychat();
+                  if (!status.ok) throw new Error(status.sync?.error || '同步失败');
+                  const latest = await api.getHeychatStatus();
+                  setHeychatStatus({ ...latest, rooms: status.rooms });
+                } catch (e: any) {
+                  alert(e.message || '同步失败');
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-white/5 text-white hover:bg-white/10"
+            >
+              重连并同步
+            </button>
+          </div>
+          <p className="text-xs text-amber-300">
+            令牌仅由服务端保存；浏览器读取配置时只会得到 ******。
+          </p>
         </div>
       </div>
 
@@ -797,13 +897,19 @@ function NoticeManagementPanel() {
 
 // ===== Server List Panel =====
 
-function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string) => void }) {
+function spaceAdminHref(platform: Platform, externalId: string): string {
+  return platform === 'kook'
+    ? `/kook/${encodeURIComponent(externalId)}`
+    : `/spaces/${encodeURIComponent(platform)}/${encodeURIComponent(externalId)}`;
+}
+
+function ServerListPanel({ onSelectServer }: { onSelectServer: (space: SpaceTarget) => void }) {
   const [servers, setServers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadServers = () => {
     setLoading(true);
-    api.getSuperSpaces('kook')
+    api.getSuperSpaces()
       .then(setServers)
       .finally(() => setLoading(false));
   };
@@ -816,14 +922,17 @@ function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string
     <div className="space-y-4">
       {servers.length === 0 ? (
         <div className="glass rounded-2xl p-8 text-center text-muted">
-          暂无服务器，邀请机器人加入 KOOK 服务器后自动注册
+          暂无平台空间，邀请 KOOK 或小黑盒机器人加入后会自动注册
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {servers.map((s) => (
             <div
-              key={s.serverId}
-              onClick={() => onSelectServer(s.serverId)}
+              key={`${s.platform}:${s.externalId}`}
+              onClick={() => onSelectServer({
+                platform: s.platform as Platform,
+                externalId: s.externalId,
+              })}
               className={cn(
                 'glass rounded-2xl p-5 cursor-pointer transition-all hover:scale-[1.02] hover:shadow-lg',
                 s.status === 'kicked' && 'opacity-60'
@@ -834,6 +943,7 @@ function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string
                   <h3 className="font-semibold text-white truncate">
                     {s.guildName || '未命名服务器'}
                   </h3>
+                  <div className="mt-1"><PlatformBadge platform={s.platform} /></div>
                   <p className="text-xs text-muted mt-1">公开ID: {s.openId || '-'}</p>
                 </div>
                 <div className="flex flex-col gap-1.5 ml-2">
@@ -851,7 +961,7 @@ function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string
               </div>
               
               <div className="space-y-1.5 text-xs text-muted">
-                <p>雪花ID: <span className="font-mono">{s.serverId}</span></p>
+                <p>平台空间ID: <span className="font-mono">{s.externalId}</span></p>
                 <p>管理员: {s.ownerUsername || s.ownerId || '未知'}</p>
                 {s.agoraAppId && (
                   <p>Agora: <span className="text-green-400">已配置</span></p>
@@ -864,7 +974,7 @@ function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string
                 </span>
                 <div className="flex items-center gap-1">
                   <a
-                    href={`/kook/${s.externalId || s.serverId}`}
+                    href={spaceAdminHref(s.platform, s.externalId)}
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={(e) => e.stopPropagation()}
@@ -884,28 +994,53 @@ function ServerListPanel({ onSelectServer }: { onSelectServer: (serverId: string
 
 // ===== Server Detail Panel =====
 
-function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () => void }) {
+function ServerDetailPanel({ space, onBack }: { space: SpaceTarget; onBack: () => void }) {
   const [server, setServer] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ServerDetailTab>('events');
   const [deleting, setDeleting] = useState(false);
+  const [advanced, setAdvanced] = useState({ heartbeatIntervalSec: 5, agoraTokenExpireSec: 3600 });
+  const [savingAdvanced, setSavingAdvanced] = useState(false);
+  const [advancedSaved, setAdvancedSaved] = useState(false);
+  const [advancedError, setAdvancedError] = useState('');
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      api.getSuperSpace('kook', serverId),
-      api.getSuperSpaceEvents('kook', serverId),
-      api.getSuperSpaceSessions('kook', serverId),
+      api.getSuperSpace(space.platform, space.externalId),
+      api.getSuperSpaceEvents(space.platform, space.externalId),
+      api.getSuperSpaceSessions(space.platform, space.externalId),
     ])
       .then(([serverData, eventsData, sessionsData]) => {
         setServer(serverData);
         setEvents(eventsData);
         setSessions(sessionsData);
+        setAdvanced({
+          heartbeatIntervalSec: serverData?.heartbeatIntervalSec ?? 5,
+          agoraTokenExpireSec: serverData?.agoraTokenExpireSec ?? 3600,
+        });
       })
       .finally(() => setLoading(false));
-  }, [serverId]);
+  }, [space.platform, space.externalId]);
+
+  const saveAdvanced = async () => {
+    setSavingAdvanced(true);
+    setAdvancedError('');
+    try {
+      await api.updateSuperSpace(space.platform, space.externalId, {
+        heartbeatIntervalSec: Number(advanced.heartbeatIntervalSec),
+        agoraTokenExpireSec: Number(advanced.agoraTokenExpireSec),
+      });
+      setAdvancedSaved(true);
+      setTimeout(() => setAdvancedSaved(false), 2000);
+    } catch (e: any) {
+      setAdvancedError(e.message || '保存失败');
+    } finally {
+      setSavingAdvanced(false);
+    }
+  };
 
   if (loading) return <div className="text-muted text-sm">加载中...</div>;
   if (!server) return <div className="text-red-300">服务器不存在</div>;
@@ -939,7 +1074,8 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
             </h2>
             <div className="mt-2 space-y-1 text-sm text-muted">
               <p>公开ID: {server.openId || '-'}</p>
-              <p>雪花ID: <span className="font-mono">{server.serverId}</span></p>
+              <p>平台: <span className="uppercase">{server.platform}</span></p>
+              <p>平台空间ID: <span className="font-mono">{server.externalId}</span></p>
               <p>管理员: {server.ownerUsername || server.ownerId || '未知'}</p>
               <p>创建时间: {new Date(server.createdAt).toLocaleString()}</p>
             </div>
@@ -957,7 +1093,7 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
               {server.status === 'kicked' ? '已踢出' : server.bound ? '已绑定' : '未绑定'}
             </span>
             <a
-              href={`/kook/${server.externalId || server.serverId}`}
+              href={spaceAdminHref(space.platform, space.externalId)}
               target="_blank"
               rel="noopener noreferrer"
               className="px-3 py-1.5 rounded-lg text-sm text-center bg-white/5 text-muted hover:text-white hover:bg-white/10 transition-colors"
@@ -974,7 +1110,7 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
                 if (!confirmed) return;
                 setDeleting(true);
                 try {
-                  await api.deleteSuperSpace('kook', serverId);
+                  await api.deleteSuperSpace(space.platform, space.externalId);
                   onBack();
                 } catch (e: any) {
                   alert(e.message || '删除失败');
@@ -998,6 +1134,45 @@ function ServerDetailPanel({ serverId, onBack }: { serverId: string; onBack: () 
               <span className="text-yellow-400">未配置</span>
             )}
           </p>
+        </div>
+
+        {/* 超管专属参数 */}
+        <div className="mt-4 pt-4 border-t border-white/10">
+          <h3 className="text-sm font-semibold text-white">超管参数</h3>
+          <p className="text-xs text-muted mt-0.5 mb-3">心跳间隔与声网令牌有效期仅由超级管理员设置，各平台空间的管理员无法修改。</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="text-xs text-muted">
+              心跳间隔（秒）
+              <input
+                type="number"
+                min={2}
+                max={60}
+                value={advanced.heartbeatIntervalSec}
+                onChange={(e) => setAdvanced((c) => ({ ...c, heartbeatIntervalSec: Number(e.target.value) }))}
+                className="mt-1 w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand/50"
+              />
+            </label>
+            <label className="text-xs text-muted">
+              声网令牌有效期（秒）
+              <input
+                type="number"
+                min={60}
+                max={86400}
+                value={advanced.agoraTokenExpireSec}
+                onChange={(e) => setAdvanced((c) => ({ ...c, agoraTokenExpireSec: Number(e.target.value) }))}
+                className="mt-1 w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand/50"
+              />
+            </label>
+          </div>
+          {advancedError && <p className="text-xs text-red-300 mt-2">{advancedError}</p>}
+          <button
+            type="button"
+            onClick={saveAdvanced}
+            disabled={savingAdvanced}
+            className="mt-3 btn-brand px-4 py-2 rounded-lg text-sm disabled:opacity-40"
+          >
+            {savingAdvanced ? '保存中...' : advancedSaved ? '已保存' : '保存超管参数'}
+          </button>
         </div>
 
       </div>

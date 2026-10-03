@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'">
+<title>XgoatCast · Windows 共享</title><link rel="stylesheet" href="style.css"></head>
+<body><header><div><small>XGOATCAST / WINDOWS PROTOTYPE</small><h1>选择你想共享的画面</h1><p id="room">从网页点击「使用 Windows 客户端共享」即可，无需登录。</p></div><button id="refresh" class="secondary">刷新列表</button></header>
+<main><section><div class="section-title"><h2>共享画面</h2><div class="tabs"><button id="screens" aria-pressed="true">整个屏幕</button><button id="windows" aria-pressed="false">应用窗口</button></div></div><div id="sources" class="sources"></div><video id="preview" autoplay muted playsinline hidden></video></section>
+<section><div class="section-title"><h2>共享声音</h2><label><input id="audio" type="checkbox" checked>共享软件声音</label></div><p class="hint">勾选下方软件可从共享声音中排除。只影响观众听到的声音，你自己仍可正常听到；不采集麦克风。</p>
+<div id="presets" class="presets"></div><details><summary>排除其他软件</summary><div id="apps"></div><label class="custom">其他软件进程名（用逗号分隔）<input id="custom" placeholder="例如：WeChat.exe, Teams.exe"></label></details>
+<p id="audio-status" class="hint">正在检查音频过滤能力…</p><div class="meter"><span id="level"></span></div></section>
+<p id="error" role="alert" hidden></p></main>
+<footer><div><strong id="status">尚未开始共享</strong><p class="hint">关闭窗口会留在托盘；停止按钮和托盘菜单均可结束共享。</p></div><button id="stop" class="danger" hidden>停止共享</button><button id="start" class="primary" disabled>开始共享</button><button id="hide" class="secondary">收起到托盘</button></footer>
+<script src="bundle.js"></script></body></html>

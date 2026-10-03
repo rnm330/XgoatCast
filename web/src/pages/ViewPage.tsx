@@ -1,3 +1,4 @@
+import { panelRequest } from '../lib/panels';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -13,6 +14,7 @@ import {
   Link2,
   CheckCircle2,
   Copy,
+  MonitorUp,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useSessionSSE } from '../hooks/useSessionSSE';
@@ -20,8 +22,38 @@ import { useAgoraView } from '../hooks/useAgoraView';
 import { cn, copyToClipboard } from '../lib/utils';
 import type { SessionInfo } from '../types';
 import { NoticeBanners } from '../components/notices/NoticeCenter';
+import { getClientEnvironment, markPageOpenOnce } from '../lib/clientEnv';
 
 export default function ViewPage() {
+  const [params] = useSearchParams();
+  const token = params.get('t') || '';
+  return token.startsWith('v_') ? <RoomPasswordGate key={token} token={token} /> : <ViewContent key={token} />;
+}
+
+function RoomPasswordGate({ token }: { token: string }) {
+  const [allowed, setAllowed] = useState(false);
+  const [checking, setChecking] = useState(true);
+  const [required, setRequired] = useState(false);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    panelRequest(`share/room-access?t=${encodeURIComponent(token)}`).then(result => {
+      if (cancelled) return;
+      setRequired(result.required); setAllowed(!result.required);
+    }).catch(e => { if (!cancelled) setError(e.message); }).finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [token]);
+  if (allowed) return <ViewContent />;
+  return <div className="min-h-screen flex items-center justify-center p-6"><form className="glass rounded-2xl p-8 w-full max-w-md space-y-5" onSubmit={async e => {
+    e.preventDefault(); setBusy(true); setError('');
+    try { await panelRequest('share/room-access', { token, password }); setPassword(''); setAllowed(true); }
+    catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  }}><h1 className="text-xl font-semibold">{checking ? '正在检查共享…' : '观看共享'}</h1>{required && <><p className="text-sm text-muted">此共享设置了观看密码。</p><input aria-label="观看密码" autoComplete="current-password" className="w-full rounded-xl px-4 py-3 bg-white/5 border border-white/10" type="password" value={password} onChange={e => setPassword(e.target.value)} maxLength={72} required /><button disabled={busy} className="btn-brand rounded-xl px-5 py-3 w-full">{busy ? '验证中…' : '验证并观看'}</button></>}{error && <p role="alert" className="text-red-300 text-sm">{error}</p>}</form></div>;
+}
+
+function ViewContent() {
   const [params] = useSearchParams();
   const token = params.get('t') || '';
   const [info, setInfo] = useState<SessionInfo | null>(null);
@@ -51,6 +83,14 @@ export default function ViewPage() {
       .then((data) => {
         setInfo(data);
         setLoading(false);
+        if (markPageOpenOnce(token, 'view')) {
+          void api.reportShareTelemetry({
+            token,
+            pageType: 'view',
+            eventType: 'page_open',
+            ...getClientEnvironment(),
+          }).catch(() => {});
+        }
       })
       .catch((e) => {
         setLoadError(e.message || '加载失败');
@@ -180,12 +220,10 @@ export default function ViewPage() {
         isFullscreen && 'hidden'
       )}>
         <div className="flex items-center gap-3">
-          <span className="text-lg">🐑</span>
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand/10 text-brand-light"><MonitorUp size={20} strokeWidth={1.7} /></span>
           <div>
-            <p className="font-semibold text-sm leading-tight">
-              {info?.sharerUsername || 'Xgoat.Cast'}
-            </p>
-            <p className="text-xs text-dim">正在直播屏幕</p>
+            <p className="font-semibold text-sm leading-tight">Xgoat.Cast 屏幕共享</p>
+            <p className="text-xs text-dim">共享人：{info?.sharerUsername || '加载中'}</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -195,7 +233,7 @@ export default function ViewPage() {
           </span>
           <button
             onClick={() => (window.location.href = '/')}
-            className="flex items-center gap-1.5 text-sm text-muted hover:text-white transition-colors"
+            className="flex items-center gap-1.5 text-sm text-muted hover:text-brand-light transition-colors"
           >
             <LogOut className="w-4 h-4" />
             退出
@@ -216,7 +254,7 @@ export default function ViewPage() {
           onMouseLeave={() => setShowControls(false)}
           onClick={() => { if (view.audioBlocked) handleEnableAudio(); }}
           className={cn(
-            'relative bg-black shadow-2xl',
+            'video-stage relative bg-black shadow-2xl overflow-hidden',
             isFullscreen
               ? 'fixed inset-0 z-50 w-screen h-screen rounded-none'
               : 'w-full max-w-6xl aspect-video rounded-2xl'
@@ -328,7 +366,7 @@ export default function ViewPage() {
             </div>
             <button
               onClick={() => { copyToClipboard(info.viewLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-              className="flex items-center gap-1.5 text-xs text-dim hover:text-white transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 text-xs text-dim hover:text-brand-light transition-colors cursor-pointer"
               title="点击复制页面链接"
             >
               <Link2 className="w-3.5 h-3.5" />

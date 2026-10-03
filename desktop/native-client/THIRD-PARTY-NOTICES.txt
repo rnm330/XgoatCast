@@ -1,0 +1,18 @@
+XgoatCast native Windows prototype 0.2
+
+Agora / Shengwang Native SDK for Windows 4.6.2
+Copyright Agora / Shengwang. Proprietary SDK; use and redistribution are
+subject to its applicable SDK license and service agreement. No SDK ownership
+or license grant is implied by this application.
+Official download and documentation: https://doc.shengwang.cn/doc/rtc/windows/resources
+
+nlohmann/json 3.11.3
+Copyright (c) 2013-2023 Niels Lohmann. MIT license.
+See json-LICENSE.txt included alongside this file.
+
+Microsoft Visual C++ runtime is linked statically. Windows system APIs are
+provided by the operating system. No Electron, Chromium, or WebView runtime is
+included in this package.
+
+SDK codec/third-party notices supplied by Agora remain applicable. Complete
+vendor SDK distribution: https://download.shengwang.cn/sdk/release/Shengwang_Native_SDK_for_Windows_v4.6.2_FULL.zip

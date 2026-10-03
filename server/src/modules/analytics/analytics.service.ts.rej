@@ -1,0 +1,21 @@
+diff a/server/src/modules/analytics/analytics.service.ts b/server/src/modules/analytics/analytics.service.ts	(rejected hunks)
+@@ -413,7 +418,9 @@ export class AnalyticsService {
+       coverage: coverage ? {
+         memberCount: Number(coverage.total_member_count),
+         capturedAt: Number(coverage.captured_at),
+-        isStale: now - Number(coverage.captured_at) > 30 * 60_000,
++        isStale: Number(coverage.failed_server_count) > 0
++          || now - Number(coverage.captured_at) > 2 * 60 * 60_000,
+@@ -431,7 +438,9 @@ export class AnalyticsService {
+           WHEN first_started_at IS NULL AND final_ended_at IS NOT NULL THEN 1 ELSE 0 END
+         ) AS not_started,
+-        SUM(CASE WHEN abnormal_end = 1 THEN 1 ELSE 0 END) AS abnormal,
++        SUM(CASE WHEN abnormal_end = 1 AND final_ended_at IS NOT NULL
++          AND first_started_at IS NOT NULL THEN 1 ELSE 0 END) AS abnormal,
+@@ -489,7 +498,9 @@ export class AnalyticsService {
+       ORDER BY captured_at ASC LIMIT 2000
+     `, [window.from, window.to]).map((row) => ({
+-      capturedAt: Number(row.captured_at), memberCount: Number(row.total_member_count),
++      timestamp: Number(row.captured_at),
++      capturedAt: Number(row.captured_at),
++      memberCount: Number(row.total_member_count),

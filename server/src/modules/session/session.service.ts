@@ -4,12 +4,12 @@ import { randomBytes, randomUUID } from 'crypto';
 import { DatabaseService, ServerSession } from '../database/database.service';
 import { AgoraService } from '../agora/agora.service';
 import { EventBusService } from '../events/events.service';
+import { AnalyticsService } from '../analytics/analytics.service';
+import type { PlatformKey, PlatformSessionContext } from '../platform/platform.types';
 import { SessionStatus, ShareSession, SessionInfo, getQualityInfo, getAudioCoefficient, getVideoCoefficient, STANDARD_MINUTE_PRICE } from './session.types';
 
 interface ViewerPresence {
   connections: number;
-  /** 仅在会话 ACTIVE 时记录，用于排除等待和宽限期。 */
-  billingStartedAt: number | null;
 }
 
 @Injectable()
@@ -19,40 +19,64 @@ export class SessionService implements OnModuleInit {
   private lastViewerMap = new Map<string, number>(); // sessionId → timestamp
   /** 内存中维护的去重加入数，session 结束时持久化。 */
   private joinCountMap = new Map<string, number>(); // sessionId → count
-  /** sessionId → viewerId → 连接引用计数和当前计费区间。 */
+  /** sessionId → viewerId → connection reference count. */
   private viewerPresenceMap = new Map<string, Map<string, ViewerPresence>>();
-  /** 已结算到数据库的累计观众毫秒。 */
-  private viewerDurationMsMap = new Map<string, number>();
   /** 当前进程中已经计入 totalViewerJoins 的 viewerId。 */
   private viewerIdsMap = new Map<string, Set<string>>();
+  /** High-frequency publisher heartbeats stay in memory between SQLite checkpoints. */
+  private readonly publisherHeartbeatMap = new Map<string, number>();
+  private readonly publisherHeartbeatPersistedAt = new Map<string, number>();
+  private readonly HEARTBEAT_DB_CHECKPOINT_MS = 30_000;
+  private readonly recovering = new Map<string, number>();
 
   constructor(
     private readonly db: DatabaseService,
     private readonly agora: AgoraService,
     private readonly bus: EventBusService,
-  ) {}
+    private readonly analytics: AnalyticsService,
+  ) {
+    this.db.integrationDatabase.exec(`
+      CREATE TABLE IF NOT EXISTS session_recovery (session_id TEXT PRIMARY KEY, until_at INTEGER NOT NULL DEFAULT 0, empty_since INTEGER);
+      CREATE TABLE IF NOT EXISTS session_viewer_ids (session_id TEXT NOT NULL, viewer_id TEXT NOT NULL, PRIMARY KEY(session_id,viewer_id));
+    `);
+  }
 
   async onModuleInit() {
+    const now = Date.now(), sql = this.db.integrationDatabase;
+    for (const row of this.db.getUnfinishedSessions()) {
+      if (row.status !== 'active' && !(row.status === 'grace' && row.graceReason === 'heartbeat')) continue;
+      const saved = sql.prepare('SELECT * FROM session_recovery WHERE session_id=?').get(row.id) as any;
+      // A repeated restart must never grant an absent publisher another full window.
+      const until = saved?.until_at || Math.min(now + 60_000, row.lastHeartbeat + 90_000);
+      const emptySince = saved?.empty_since ?? now;
+      sql.prepare('INSERT OR REPLACE INTO session_recovery VALUES(?,?,?)').run(row.id, until, emptySince);
+      this.recovering.set(row.id, until);
+      this.lastViewerMap.set(row.id, emptySince);
+      this.db.updateSession(row.id, { viewerCount: 0 });
+    }
     this.logger.log('SessionService initialized (SQLite backend)');
   }
 
   /** Convert DB session to in-memory ShareSession format */
   private fromDb(row: ServerSession): ShareSession {
+    const space = row.serverId ? this.db.getServer(row.serverId) : undefined;
     return {
       id: row.id,
       token: row.token,
       channel: row.channel,
       sharerUserId: row.sharerUserId,
       sharerUsername: row.sharerUsername,
-      guildId: row.guildId,
-      targetChannelId: row.targetChannelId,
+      platform: (space?.platform || 'kook') as PlatformKey,
+      spaceId: row.serverId || row.guildId,
+      externalSpaceId: space?.externalId || row.guildId || row.serverId,
+      externalChannelId: row.targetChannelId,
       status: row.status as SessionStatus,
       viewerCount: row.viewerCount,
       peakViewers: row.peakViewers,
       totalViewerJoins: row.totalViewerJoins,
       viewerDurationMs: row.viewerDurationMs,
       quality: row.quality,
-      cardMessageId: row.cardMessageId || undefined,
+      platformMessageId: row.cardMessageId || undefined,
       manualCreated: !!row.manualCreated,
       createdAt: row.createdAt,
       startedAt: row.startedAt,
@@ -67,23 +91,23 @@ export class SessionService implements OnModuleInit {
     };
   }
 
-  private toDb(session: ShareSession, serverId: string): ServerSession {
+  private toDb(session: ShareSession): ServerSession {
     return {
       id: session.id,
       token: session.token,
       channel: session.channel,
-      serverId,
+      serverId: session.spaceId,
       sharerUserId: session.sharerUserId,
       sharerUsername: session.sharerUsername,
-      guildId: session.guildId,
-      targetChannelId: session.targetChannelId,
+      guildId: session.externalSpaceId,
+      targetChannelId: session.externalChannelId,
       status: session.status,
       viewerCount: session.viewerCount,
       peakViewers: session.peakViewers,
       totalViewerJoins: session.totalViewerJoins,
       viewerDurationMs: session.viewerDurationMs,
       quality: session.quality,
-      cardMessageId: session.cardMessageId || null,
+      cardMessageId: session.platformMessageId || null,
       manualCreated: session.manualCreated ? 1 : 0,
       createdAt: session.createdAt,
       startedAt: session.startedAt,
@@ -98,9 +122,8 @@ export class SessionService implements OnModuleInit {
     };
   }
 
-  /** Get server config for a session's guild */
-  private getServerSessionConfig(guildId: string) {
-    const server = this.db.getServer(guildId);
+  private getServerSessionConfig(session: ShareSession) {
+    const server = this.db.getServer(session.spaceId);
     if (server) {
       return {
         idleTimeoutSec: server.idleTimeoutSec,
@@ -115,11 +138,12 @@ export class SessionService implements OnModuleInit {
   createSession(params: {
     sharerUserId: string;
     sharerUsername: string;
-    guildId: string;
-    targetChannelId: string;
+    platform: PlatformKey;
+    spaceId: string;
+    externalSpaceId: string;
+    externalChannelId: string;
     manualCreated?: boolean;
     quality?: string;
-    serverId?: string;
   }): ShareSession {
     const id = randomUUID();
     const shortId = id.replace(/-/g, '').slice(0, 12);
@@ -127,7 +151,7 @@ export class SessionService implements OnModuleInit {
     const now = Date.now();
 
     // Get server config for Agora channel name generation
-    const serverConfig = params.serverId ? this.db.getServer(params.serverId) : null;
+    const serverConfig = this.db.getServer(params.spaceId);
     const agoraAppId = serverConfig?.agoraAppId || '';
 
     const session: ShareSession = {
@@ -136,8 +160,10 @@ export class SessionService implements OnModuleInit {
       channel: this.agora.generateChannelName(shortId),
       sharerUserId: params.sharerUserId,
       sharerUsername: params.sharerUsername,
-      guildId: params.guildId,
-      targetChannelId: params.targetChannelId,
+      platform: params.platform,
+      spaceId: params.spaceId,
+      externalSpaceId: params.externalSpaceId,
+      externalChannelId: params.externalChannelId,
       status: SessionStatus.PENDING,
       viewerCount: 0,
       peakViewers: 0,
@@ -156,8 +182,9 @@ export class SessionService implements OnModuleInit {
       lowLatency: false,
     };
 
-    const serverId = params.serverId || params.guildId || '';
-    this.db.createSession(this.toDb(session, serverId));
+    const stored = this.toDb(session);
+    this.db.createSession(stored);
+    this.analytics.recordShareCreated(stored);
     return session;
   }
 
@@ -173,14 +200,37 @@ export class SessionService implements OnModuleInit {
     return this.fromDb(row);
   }
 
-  /** 检查用户是否有活跃的共享会话（非 ENDED 状态） */
-  hasActiveSession(sharerUserId: string): boolean {
-    const sessions = this.db.getActiveSessionsByUser(sharerUserId);
+  /** Check a platform-scoped user identity for unfinished sharing sessions. */
+  hasActiveSession(sharerUserId: string, platform?: PlatformKey): boolean {
+    const sessions = platform
+      ? this.db.getActiveSessionsByPlatformUser(platform, sharerUserId)
+      : this.db.getActiveSessionsByUser(sharerUserId);
     return sessions.length > 0;
   }
 
-  cancelPendingSession(id: string): boolean {
-    return this.db.deletePendingSession(id);
+  /** Translate legacy session storage into the platform-neutral event boundary. */
+  private getPlatformContext(session: ShareSession): PlatformSessionContext {
+    return {
+      platform: session.platform,
+      spaceId: session.spaceId,
+      externalSpaceId: session.externalSpaceId,
+      externalChannelId: session.externalChannelId,
+    };
+  }
+
+  cancelPendingSession(id: string, reason = 'start_card_delivery_failed'): boolean {
+    const session = this.db.getSessionById(id);
+    const deleted = this.db.deletePendingSession(id);
+    if (deleted && session) {
+      const endedAt = Date.now();
+      this.analytics.recordShareEnded({
+        ...session,
+        status: SessionStatus.ENDED,
+        endedAt,
+        durationMs: null,
+      }, reason, false);
+    }
+    return deleted;
   }
 
   listAll(): ShareSession[] {
@@ -212,16 +262,19 @@ export class SessionService implements OnModuleInit {
       session.lowLatency = lowLatency;
     }
 
+    const firstStart = !session.startedAt;
+    const now = Date.now();
     const wasGrace = session.status === SessionStatus.GRACE;
     session.status = SessionStatus.ACTIVE;
-    session.lastHeartbeat = Date.now();
+    session.lastHeartbeat = now;
     session.graceStartedAt = null;
     session.graceReason = null;
-    session.lastViewerAt = Date.now();
+    session.lastViewerAt = now;
     if (!session.startedAt) {
-      session.startedAt = Date.now();
+      session.startedAt = now;
     }
-    this.resumeViewerBilling(session.id, session.lastHeartbeat);
+    this.publisherHeartbeatMap.set(session.id, now);
+    this.publisherHeartbeatPersistedAt.set(session.id, now);
 
     const dbRow = this.db.getSessionByToken(token);
     if (dbRow) {
@@ -237,21 +290,26 @@ export class SessionService implements OnModuleInit {
       });
     }
 
+    const stored = this.db.getSessionById(session.id);
+    if (stored) {
+      if (firstStart) this.analytics.recordShareStarted(stored);
+      else this.analytics.recordShareMetrics(stored);
+    }
+
     this.logger.log(
-      `startSharing: session=${session.id}, wasGrace=${wasGrace}, cardMessageId=${session.cardMessageId || 'none'}, targetChannelId=${session.targetChannelId || 'empty'}, lowLatency=${session.lowLatency}`,
+      `startSharing: session=${session.id}, wasGrace=${wasGrace}, platformMessageId=${session.platformMessageId || 'none'}, externalChannelId=${session.externalChannelId || 'empty'}, lowLatency=${session.lowLatency}`,
     );
 
-    if (!wasGrace && !session.cardMessageId) {
+    if (!wasGrace && !session.platformMessageId) {
       this.logger.log(`startSharing: emitting session.started event for ${session.id}`);
       this.bus.emitSessionStarted({
+        ...this.getPlatformContext(session),
         sessionId: session.id,
         token: session.token,
         sharerUsername: session.sharerUsername,
-        targetChannelId: session.targetChannelId,
-        guildId: session.guildId,
       });
     } else {
-      this.logger.log(`startSharing: skipping card push (wasGrace=${wasGrace}, cardMessageId exists=${!!session.cardMessageId})`);
+      this.logger.log(`startSharing: skipping platform message (wasGrace=${wasGrace}, platformMessageId exists=${!!session.platformMessageId})`);
     }
 
     // 通知 SSE 控制器推送最新状态给发布端
@@ -267,7 +325,13 @@ export class SessionService implements OnModuleInit {
   heartbeat(token: string): boolean {
     const session = this.getByToken(token);
     if (!session || session.status === SessionStatus.ENDED) return false;
-    session.lastHeartbeat = Date.now();
+
+    const now = Date.now();
+    const previousPersistedAt = session.lastHeartbeat;
+    session.lastHeartbeat = now;
+    this.publisherHeartbeatMap.set(session.id, now);
+
+    let recovered = false;
     if (
       session.status === SessionStatus.GRACE &&
       session.graceReason === 'heartbeat'
@@ -275,17 +339,28 @@ export class SessionService implements OnModuleInit {
       session.status = SessionStatus.ACTIVE;
       session.graceStartedAt = null;
       session.graceReason = null;
-      this.resumeViewerBilling(session.id, session.lastHeartbeat);
+      recovered = true;
       this.logger.log('session ' + session.id + ' reconnected within grace');
     }
 
-    const dbRow = this.db.getSessionByToken(token);
-    if (dbRow) {
-      this.db.updateSession(dbRow.id, {
-        lastHeartbeat: session.lastHeartbeat,
+    const lastPersistedAt = this.publisherHeartbeatPersistedAt.get(session.id)
+      ?? previousPersistedAt;
+    if (recovered || now - lastPersistedAt >= this.HEARTBEAT_DB_CHECKPOINT_MS) {
+      this.db.updateSession(session.id, {
+        lastHeartbeat: now,
         status: session.status,
         graceStartedAt: session.graceStartedAt,
         graceReason: session.graceReason || null,
+      });
+      this.publisherHeartbeatPersistedAt.set(session.id, now);
+    }
+
+    if (recovered) {
+      this.recordCurrentShareMetrics(session.id);
+      this.bus.emitSessionStateChanged({
+        sessionId: session.id,
+        status: session.status,
+        viewerCount: session.viewerCount,
       });
     }
     return true;
@@ -298,7 +373,6 @@ export class SessionService implements OnModuleInit {
     const session = this.getByToken(token);
     if (!session || session.status === SessionStatus.ENDED) return undefined;
     const now = Date.now();
-    this.pauseViewerBilling(session.id, now);
     session.status = SessionStatus.GRACE;
     session.graceReason = 'stopped';
     session.graceStartedAt = now;
@@ -314,7 +388,9 @@ export class SessionService implements OnModuleInit {
       });
     }
 
-    const cfg = this.getServerSessionConfig(session.guildId);
+    this.recordCurrentShareMetrics(session.id);
+
+    const cfg = this.getServerSessionConfig(session);
     this.logger.log(
       `stopSharing: session=${session.id} entered 'stopped' grace, idle timeout ${cfg.idleTimeoutSec}s`,
     );
@@ -333,7 +409,6 @@ export class SessionService implements OnModuleInit {
   viewerConnected(sessionId: string, viewerId: string): void {
     const session = this.getById(sessionId);
     if (!session || session.status === SessionStatus.ENDED) return;
-    const now = Date.now();
     let viewers = this.viewerPresenceMap.get(sessionId);
     if (!viewers) {
       viewers = new Map();
@@ -344,10 +419,7 @@ export class SessionService implements OnModuleInit {
     if (existing) {
       existing.connections += 1;
     } else {
-      viewers.set(viewerId, {
-        connections: 1,
-        billingStartedAt: session.status === SessionStatus.ACTIVE ? now : null,
-      });
+      viewers.set(viewerId, { connections: 1 });
       isNewViewer = true;
     }
     this.syncViewerMetrics(session, viewers.size, isNewViewer ? viewerId : undefined);
@@ -360,7 +432,6 @@ export class SessionService implements OnModuleInit {
     if (!viewers || !presence) return;
     presence.connections -= 1;
     if (presence.connections <= 0) {
-      this.accrueViewerDuration(sessionId, presence, Date.now());
       viewers.delete(viewerId);
     }
     if (viewers.size === 0) this.viewerPresenceMap.delete(sessionId);
@@ -388,6 +459,8 @@ export class SessionService implements OnModuleInit {
     } else if (!this.lastViewerMap.has(session.id)) {
       this.lastViewerMap.set(session.id, Date.now());
     }
+    this.db.integrationDatabase.prepare(`INSERT INTO session_recovery(session_id,empty_since) VALUES(?,?)
+      ON CONFLICT(session_id) DO UPDATE SET empty_since=excluded.empty_since`).run(session.id, this.lastViewerMap.get(session.id) ?? null);
 
     // viewerId 去重后记录加入数（用于 endSession 时持久化）
     if (joinedViewerId) {
@@ -396,11 +469,17 @@ export class SessionService implements OnModuleInit {
         ids = new Set();
         this.viewerIdsMap.set(session.id, ids);
       }
-      if (!ids.has(joinedViewerId)) {
+      const inserted = this.db.integrationDatabase.prepare('INSERT OR IGNORE INTO session_viewer_ids VALUES(?,?)').run(session.id, joinedViewerId).changes;
+      if (!ids.has(joinedViewerId) && inserted) {
         ids.add(joinedViewerId);
         this.recordViewerJoin(session.id, session.totalViewerJoins);
       }
     }
+
+    // Update the aggregate record only when audience presence changes. This
+    // avoids periodic per-viewer duration checkpoints while keeping live
+    // dashboard totals reasonably current.
+    this.recordCurrentShareMetrics(session.id);
 
     // 通过 EventBus 推送状态变更，SSE 控制器监听此事件推给所有客户端
     this.bus.emitSessionStateChanged({
@@ -410,67 +489,24 @@ export class SessionService implements OnModuleInit {
     });
   }
 
-  private accrueViewerDuration(
-    sessionId: string,
-    presence: ViewerPresence,
-    now: number,
-  ): void {
-    if (presence.billingStartedAt === null) return;
-    const session = this.getById(sessionId);
-    const current = this.viewerDurationMsMap.get(sessionId)
-      ?? session?.viewerDurationMs
-      ?? 0;
-    const next = current + Math.max(0, now - presence.billingStartedAt);
-    this.viewerDurationMsMap.set(sessionId, next);
-    presence.billingStartedAt = null;
-    this.db.updateSession(sessionId, { viewerDurationMs: next });
+  private recordCurrentShareMetrics(sessionId: string): void {
+    const stored = this.db.getSessionById(sessionId);
+    if (!stored) return;
+    stored.totalViewerJoins = this.joinCountMap.get(sessionId) ?? stored.totalViewerJoins;
+    this.analytics.recordShareMetrics(stored);
   }
 
-  private pauseViewerBilling(sessionId: string, now = Date.now()): void {
-    const viewers = this.viewerPresenceMap.get(sessionId);
-    if (!viewers) return;
-    for (const presence of viewers.values()) {
-      this.accrueViewerDuration(sessionId, presence, now);
+  private resolveEndReason(session: ShareSession, reason: string): string {
+    if (reason !== 'idle_timeout') return reason;
+    if (!session.startedAt || session.status === SessionStatus.PENDING) {
+      return 'not_started_timeout';
     }
+    if (session.graceReason === 'heartbeat') return 'heartbeat_timeout';
+    if (session.graceReason === 'stopped') return 'stopped_timeout';
+    return 'idle_timeout';
   }
 
-  private resumeViewerBilling(sessionId: string, now = Date.now()): void {
-    const viewers = this.viewerPresenceMap.get(sessionId);
-    if (!viewers) return;
-    for (const presence of viewers.values()) {
-      if (presence.billingStartedAt === null) presence.billingStartedAt = now;
-    }
-  }
-
-  private getViewerDurationMs(session: ShareSession, now = Date.now()): number | null {
-    const stored = this.viewerDurationMsMap.get(session.id) ?? session.viewerDurationMs;
-    if (stored === null) return null;
-    let total = stored;
-    const viewers = this.viewerPresenceMap.get(session.id);
-    if (viewers) {
-      for (const presence of viewers.values()) {
-        if (presence.billingStartedAt !== null) {
-          total += Math.max(0, now - presence.billingStartedAt);
-        }
-      }
-    }
-    return total;
-  }
-
-  /** 定期落盘活跃观众时长，降低进程异常退出造成的计费误差。 */
-  @Interval(10_000)
-  checkpointViewerDurations(): void {
-    const now = Date.now();
-    for (const sessionId of this.viewerPresenceMap.keys()) {
-      this.pauseViewerBilling(sessionId, now);
-      const session = this.getById(sessionId);
-      if (session?.status === SessionStatus.ACTIVE) {
-        this.resumeViewerBilling(sessionId, now);
-      }
-    }
-  }
-
-  setCardMessageId(sessionId: string, messageId: string): void {
+  setPlatformMessageId(sessionId: string, messageId: string): void {
     this.db.updateSession(sessionId, { cardMessageId: messageId });
   }
 
@@ -478,10 +514,12 @@ export class SessionService implements OnModuleInit {
   recordViewerJoin(sessionId: string, persistedCount = 0): void {
     const current = this.joinCountMap.get(sessionId) ?? persistedCount;
     this.joinCountMap.set(sessionId, current + 1);
+    this.db.updateSession(sessionId, { totalViewerJoins: current + 1 });
   }
 
   updateQuality(sessionId: string, quality: string): void {
     this.db.updateSession(sessionId, { quality });
+    this.recordCurrentShareMetrics(sessionId);
     this.logger.log(`session ${sessionId} quality set to ${quality}`);
   }
 
@@ -492,12 +530,12 @@ export class SessionService implements OnModuleInit {
     const ageMs = Date.now() - session.createdAt;
     const endedAt = Date.now();
     const durationMs = session.startedAt ? endedAt - session.startedAt : null;
-    this.pauseViewerBilling(sessionId, endedAt);
-    const viewerDurationMs = this.getViewerDurationMs(session, endedAt);
+    const endReason = this.resolveEndReason(session, reason);
 
     // 持久化峰值和累计加入数（从内存 Map 取，不再实时写 DB）
     const totalJoins = this.joinCountMap.get(sessionId) ?? session.totalViewerJoins;
     const peakViewers = session.peakViewers;
+    const viewerDurationMs = peakViewers * Math.max(0, durationMs || 0);
 
     this.db.updateSession(sessionId, {
       status: SessionStatus.ENDED,
@@ -508,21 +546,28 @@ export class SessionService implements OnModuleInit {
       viewerDurationMs,
     });
 
+    const endedRecord = this.db.getSessionById(sessionId);
+    if (endedRecord) this.analytics.recordShareEnded(endedRecord, endReason);
+
     // 清理内存 Map
     this.lastViewerMap.delete(sessionId);
     this.joinCountMap.delete(sessionId);
     this.viewerPresenceMap.delete(sessionId);
-    this.viewerDurationMsMap.delete(sessionId);
     this.viewerIdsMap.delete(sessionId);
+    this.publisherHeartbeatMap.delete(sessionId);
+    this.publisherHeartbeatPersistedAt.delete(sessionId);
+    this.recovering.delete(sessionId);
+    this.db.integrationDatabase.prepare('DELETE FROM session_recovery WHERE session_id=?').run(sessionId);
+    this.db.integrationDatabase.prepare('DELETE FROM session_viewer_ids WHERE session_id=?').run(sessionId);
 
     this.bus.emitSessionEnded({
+      ...this.getPlatformContext(session),
       sessionId: session.id,
-      reason,
-      targetChannelId: session.targetChannelId,
-      cardMessageId: session.cardMessageId,
+      reason: endReason,
+      platformMessageId: session.platformMessageId,
     });
     this.logger.warn(
-      `session ${session.id} ENDED: reason=${reason}, age=${(ageMs / 1000).toFixed(1)}s, ` +
+      `session ${session.id} ENDED: reason=${endReason}, age=${(ageMs / 1000).toFixed(1)}s, ` +
       `startedAt=${session.startedAt ? 'yes' : 'no'}, ` +
       `duration=${durationMs}ms, peakViewers=${session.peakViewers}`,
     );
@@ -553,11 +598,8 @@ export class SessionService implements OnModuleInit {
 
     // 观众：订阅视频流，按 lowLatency 模式选择互动直播或极速直播视频系数
     const viewerVideoCoeff = getVideoCoefficient(qi.tier, session.lowLatency);
-    const viewerDurationMs = this.getViewerDurationMs(session);
-    const legacyViewerEstimate = viewerDurationMs === null;
-    const viewerDurationSec = legacyViewerEstimate
-      ? session.peakViewers * durationSec
-      : viewerDurationMs / 1000;
+    const viewerDurationMs = session.peakViewers * Math.max(0, durationMs || 0);
+    const viewerDurationSec = viewerDurationMs / 1000;
     const viewerStandardSec = viewerDurationSec * viewerVideoCoeff;
 
     // 标准时长（分钟），向上取整
@@ -569,20 +611,17 @@ export class SessionService implements OnModuleInit {
     const estimatedCost = Math.round(standardMinutes * STANDARD_MINUTE_PRICE * 100) / 100;
 
     const durationMin = durationSec / 60;
-    const viewerDurationMin = viewerDurationSec / 60;
     const modeLabel = session.lowLatency ? '互动直播' : '极速直播';
     const billingDetail = durationMs
-      ? legacyViewerEstimate
-        ? `[旧记录估算] ${durationMin.toFixed(1)}主播分×系数${broadcasterAudioCoeff} + ${session.peakViewers}峰值观众×${durationMin.toFixed(1)}分×${modeLabel}系数${viewerVideoCoeff} = ${standardMinutes} 标准分钟`
-        : `${durationMin.toFixed(1)}主播分×系数${broadcasterAudioCoeff} + ${viewerDurationMin.toFixed(1)}累计观众分×${modeLabel}系数${viewerVideoCoeff} = ${standardMinutes} 标准分钟`
+      ? `[峰值估算] ${durationMin.toFixed(1)}主播分×系数${broadcasterAudioCoeff} + ${session.peakViewers}峰值观众×${durationMin.toFixed(1)}分×${modeLabel}系数${viewerVideoCoeff} = ${standardMinutes} 标准分钟`
       : '-';
 
-    const serverConfig = this.db.getServer(session.guildId);
+    const serverConfig = this.db.getServer(session.spaceId);
     const globalCfg = this.db.getGlobalConfig();
     const publicDomain = globalCfg.publicDomain;
 
     let idleRemainingSec: number | undefined;
-    const cfg = this.getServerSessionConfig(session.guildId);
+    const cfg = this.getServerSessionConfig(session);
     if (session.status === SessionStatus.PENDING) {
       const elapsed = (Date.now() - session.createdAt) / 1000;
       idleRemainingSec = Math.max(0, Math.ceil(cfg.idleTimeoutSec - elapsed));
@@ -605,8 +644,12 @@ export class SessionService implements OnModuleInit {
     // 从内存 Map 取实时 totalViewerJoins（不再实时写 DB）
     const liveJoins = this.joinCountMap.get(session.id) ?? session.totalViewerJoins;
 
+    const panelRoom = session.platform === 'panel'
+      ? this.db.integrationDatabase.prepare('SELECT view_token FROM panel_rooms WHERE session_id = ?').get(session.id) as { view_token: string } | undefined
+      : undefined;
     return {
       id: session.id,
+      platform: session.platform,
       channel: session.channel,
       sharerUsername: session.sharerUsername,
       status: session.status,
@@ -616,7 +659,7 @@ export class SessionService implements OnModuleInit {
       viewerDurationMs,
       quality: session.quality,
       shareLink: `${publicDomain.replace(/\/+$/, '')}/share?t=${session.token}`,
-      viewLink: `${publicDomain.replace(/\/+$/, '')}/view?t=${session.token}`,
+      viewLink: `${publicDomain.replace(/\/+$/, '')}/view?t=${panelRoom?.view_token || session.token}`,
       createdAt: session.createdAt,
       startedAt: session.startedAt,
       endedAt: session.endedAt,
@@ -630,6 +673,7 @@ export class SessionService implements OnModuleInit {
       noViewerRemainingSec,
       lowLatency: session.lowLatency,
       allowLowLatency: !!serverConfig?.allowLowLatency,
+      allowQualityPreference: !!serverConfig?.allowQualityPreference,
     };
   }
 
@@ -639,16 +683,33 @@ export class SessionService implements OnModuleInit {
   @Interval(5000)
   async watchdog() {
     const now = Date.now();
-    const sessions = this.db.getAllSessions().filter((s) => s.status !== 'ended');
+    const sessions = this.db.getUnfinishedSessions();
 
     for (const row of sessions) {
       const session = this.fromDb(row);
-      const cfg = this.getServerSessionConfig(session.guildId);
+      const cfg = this.getServerSessionConfig(session);
 
       // 绝对过期：超过最大生命周期强制结束
       if (now - session.createdAt > this.MAX_SESSION_AGE_MS) {
         this.endSession(session.id, 'max_age');
         continue;
+      }
+
+      const recoveryUntil = this.recovering.get(session.id);
+      if (recoveryUntil !== undefined) {
+        if (now < recoveryUntil) continue;
+        this.recovering.delete(session.id);
+        this.db.integrationDatabase.prepare('UPDATE session_recovery SET until_at=0 WHERE session_id=?').run(session.id);
+        if (!this.publisherHeartbeatMap.has(session.id)) {
+          this.endSession(session.id, 'heartbeat_timeout');
+          continue;
+        }
+      }
+      if (session.status === SessionStatus.ACTIVE && session.viewerCount === 0 && !this.lastViewerMap.has(session.id)) {
+        const since = session.startedAt || now;
+        this.lastViewerMap.set(session.id, since);
+        this.db.integrationDatabase.prepare(`INSERT INTO session_recovery(session_id,empty_since) VALUES(?,?)
+          ON CONFLICT(session_id) DO UPDATE SET empty_since=excluded.empty_since`).run(session.id, since);
       }
 
       // 无人观看倒计时（从内存 Map 读 lastViewerAt，不再查 DB）
@@ -674,9 +735,10 @@ export class SessionService implements OnModuleInit {
 
       // ACTIVE 状态：心跳丢失 → 进入 GRACE
       if (session.status === SessionStatus.ACTIVE) {
-        const elapsed = now - session.lastHeartbeat;
+        const latestHeartbeat = this.publisherHeartbeatMap.get(session.id)
+          ?? session.lastHeartbeat;
+        const elapsed = now - latestHeartbeat;
         if (elapsed > cfg.heartbeatIntervalSec * 1000 * 3) {
-          this.pauseViewerBilling(session.id, now);
           this.db.updateSession(session.id, {
             status: SessionStatus.GRACE,
             graceReason: 'heartbeat',

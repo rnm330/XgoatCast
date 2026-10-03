@@ -1,0 +1,9 @@
+deps/
+out/
+*.obj
+*.pdb
+*.ilk
+*.res
+
+# Local snapshots and archived prototype packages
+versions/

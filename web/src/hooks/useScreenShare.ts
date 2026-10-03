@@ -7,8 +7,7 @@ import type {
 import { api } from '../lib/api';
 import { installScreenAudioInterceptor } from '../lib/screenAudioCapture';
 
-const AgoraRTC = (window as any).AgoraRTC;
-AgoraRTC.setLogLevel(2);
+// Resolve the SDK when the user starts; a failed CDN load must not crash the page.
 
 // 安装 getDisplayMedia 劫持器（模块级，仅执行一次）
 installScreenAudioInterceptor();
@@ -70,13 +69,17 @@ export const QUALITY_OPTIONS: QualityOption[] = [
 ];
 
 export function useScreenShare(token: string, onTrackEnded?: () => void) {
+  const publishingRef = useRef(false);
   const clientRef = useRef<IAgoraRTCClient | null>(null);
   const screenVideoRef = useRef<ILocalVideoTrack | null>(null);
   const screenAudioRef = useRef<ILocalAudioTrack | null>(null);
+  const microphoneRef = useRef<ILocalAudioTrack | null>(null);
+  const microphoneOperationRef = useRef(false);
   const onTrackEndedRef = useRef(onTrackEnded);
   onTrackEndedRef.current = onTrackEnded;
   const [isSharing, setIsSharing] = useState(false);
   const [error, setError] = useState<string>('');
+  const [microphoneBusy, setMicrophoneBusy] = useState(false);
   // 本地预览容器（分享者查看自己的画面，不走声网）
   const localPreviewRef = useRef<HTMLDivElement | null>(null);
 
@@ -95,19 +98,25 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
     async (opts: {
       qualityKey?: string;
       lowLatency: boolean;
+      microphoneEnabled?: boolean;
+      optimizationMode?: 'detail' | 'motion';
       bitrateConfig?: {
         bitrateMin?: number;
         bitrateMax?: number;
       };
     }) => {
+      if (publishingRef.current || clientRef.current) {
+        return { success: false, message: '正在启动或共享中，请勿重复点击。' };
+      }
+      publishingRef.current = true;
       setError('');
       try {
-        if (!(window as any).AgoraRTC) {
+        const AgoraRTC = (window as any).AgoraRTC;
+        if (!AgoraRTC) {
           throw new Error('Agora SDK 未加载，请检查网络连接');
         }
 
-        // 1. 先获取 token（不连接服务器）
-        const tokenResp = await api.getShareToken(token, 'publisher');
+        AgoraRTC.setLogLevel(2);
 
         // 2. 先创建屏幕共享轨道（用户选择窗口）
         const qKey = opts.qualityKey || '1080p_2';
@@ -125,8 +134,8 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         const screenTrack = await AgoraRTC.createScreenVideoTrack(
           {
             encoderConfig,
-            // 两种模式均流畅优先：弱网时允许降低码率或分辨率以尽量保持帧率。
-            optimizationMode: 'motion',
+            // 独立于直播延迟模式：detail 保留细节，motion 尽量保持帧率。
+            optimizationMode: opts.optimizationMode ?? 'motion',
           },
           // ScreenAudioTrackInitConfig：关 3A 保真多声道 + restrictOwnAudio 防回声
           {
@@ -149,9 +158,12 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         ];
         if (screenAudioRef.current) tracks.push(screenAudioRef.current);
 
+        // Capture directly from the click, before network waits consume user activation.
+        const tokenResp = await api.getShareToken(token, 'publisher');
+
         // 3. 用户已选择窗口，现在连接服务器
-        // 极速直播（默认）：mode:'live' + host 角色，观众端用 audience+level:1，motion 流畅优先
-        // 低延迟模式：mode:'rtc'，超低延时 400-800ms，motion 流畅优先
+        // 极速直播（默认）：mode:'live' + host 角色，观众端用 audience+level:1
+        // 低延迟模式：mode:'rtc'，超低延时 400-800ms
         const client = opts.lowLatency
           ? AgoraRTC.createClient({ mode: 'rtc', codec: 'h264' })
           : AgoraRTC.createClient({ mode: 'live', codec: 'h264' });
@@ -170,6 +182,14 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         );
 
         // 4. 发布轨道
+        if (opts.microphoneEnabled) {
+          try {
+            microphoneRef.current = await AgoraRTC.createMicrophoneAudioTrack();
+            tracks.push(microphoneRef.current);
+          } catch {
+            throw new Error('无法开启麦克风，请检查浏览器的麦克风权限和设备连接');
+          }
+        }
         await client.publish(tracks);
         screenVideoRef.current?.on('track-ended', () => {
           // track 意外结束（用户通过浏览器原生 UI 停止、或高分辨率导致资源不足）
@@ -202,25 +222,70 @@ export function useScreenShare(token: string, onTrackEnded?: () => void) {
         }
         setError(msg);
         return { success: false, message: msg };
+      } finally {
+        publishingRef.current = false;
       }
     },
     [token],
   );
 
+  const setMicrophoneEnabled = useCallback(async (enabled: boolean): Promise<boolean> => {
+    const client = clientRef.current;
+    if (!client || publishingRef.current || microphoneOperationRef.current) return false;
+    if (enabled === !!microphoneRef.current) return true;
+    microphoneOperationRef.current = true;
+    setMicrophoneBusy(true);
+    setError('');
+    if (enabled) {
+      let track: ILocalAudioTrack | null = null;
+      try {
+        const AgoraRTC = (window as any).AgoraRTC;
+        track = await AgoraRTC.createMicrophoneAudioTrack();
+        if (clientRef.current !== client) { track.close(); return false; }
+        microphoneRef.current = track;
+        await client.publish(track);
+        if (clientRef.current !== client || microphoneRef.current !== track) return false;
+        return true;
+      } catch {
+        if (microphoneRef.current === track) microphoneRef.current = null;
+        track?.close();
+        setError('无法开启麦克风，请检查浏览器的麦克风权限和设备连接');
+        return false;
+      } finally {
+        microphoneOperationRef.current = false;
+        setMicrophoneBusy(false);
+      }
+    }
+    const track = microphoneRef.current;
+    microphoneRef.current = null;
+    try {
+      if (track) await client.unpublish(track);
+      return true;
+    } catch {
+      setError('麦克风已停止采集，但通知观众时出现问题，请停止共享后重试');
+      return true;
+    } finally {
+      track?.close();
+      microphoneOperationRef.current = false;
+      setMicrophoneBusy(false);
+    }
+  }, []);
+
   const stop = useCallback(async () => {
     const client = clientRef.current;
-    try {
-      screenVideoRef.current?.stop();
-      screenAudioRef.current?.stop();
-      if (client) await client.leave();
-    } catch (e) {
-      console.error('leave error', e);
-    }
+    const tracks = [screenVideoRef.current, screenAudioRef.current, microphoneRef.current];
     screenVideoRef.current = null;
     screenAudioRef.current = null;
+    microphoneRef.current = null;
     clientRef.current = null;
+    for (const track of tracks) {
+      try { track?.removeAllListeners('track-ended'); } catch {}
+      try { track?.stop(); } catch {}
+      try { track?.close(); } catch {}
+    }
+    try { if (client) await client.leave(); } catch (e) { console.error('leave error', e); }
     setIsSharing(false);
   }, []);
 
-  return { isSharing, error, publish, stop, setLocalPreviewContainer };
+  return { isSharing, error, microphoneBusy, publish, setMicrophoneEnabled, stop, setLocalPreviewContainer };
 }

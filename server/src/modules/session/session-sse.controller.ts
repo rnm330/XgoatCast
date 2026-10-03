@@ -1,3 +1,5 @@
+import { PanelAccessService } from '../panels/panel-access.service';
+import type { Request } from 'express';
 import {
   Controller,
   Get,
@@ -5,10 +7,13 @@ import {
   Res,
   Logger,
   OnModuleInit,
+  Req,
+  Optional,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { SessionService } from './session.service';
 import { EventBusService } from '../events/events.service';
+import { AnalyticsService } from '../analytics/analytics.service';
 
 interface SseClient {
   res: Response;
@@ -27,6 +32,8 @@ export class SessionSseController implements OnModuleInit {
   constructor(
     private readonly sessionService: SessionService,
     private readonly bus: EventBusService,
+    private readonly analytics: AnalyticsService,
+    @Optional() private readonly panels?: PanelAccessService,
   ) {}
 
   onModuleInit() {
@@ -43,7 +50,15 @@ export class SessionSseController implements OnModuleInit {
       this.pushToSession(event.sessionId, 'session_ended', {
         sessionId: event.sessionId,
       });
+      const clients = this.sseClients.get(event.sessionId) || [];
+      for (const client of clients) {
+        this.analytics.clientDisconnected(
+          client.role === 'viewer' ? 'view' : 'share',
+          `${event.sessionId}:${client.uid}`,
+        );
+      }
       this.sseClients.delete(event.sessionId);
+      for (const client of clients) client.res.end();
     });
   }
 
@@ -58,7 +73,9 @@ export class SessionSseController implements OnModuleInit {
     @Query('role') role: string,
     @Query('cid') clientId: string,
     @Query('vid') viewerId: string,
+    @Query('passive') passive: string,
     @Res() res: Response,
+    @Req() req?: Request,
   ) {
     // ===== SSE 响应头 =====
     res.setHeader('Content-Type', 'text/event-stream');
@@ -66,6 +83,7 @@ export class SessionSseController implements OnModuleInit {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // 禁用 nginx 缓冲
     res.flushHeaders();
+    res.write('retry: 1000\n\n');
 
     // ===== 鉴权 =====
     if (!token) {
@@ -73,6 +91,12 @@ export class SessionSseController implements OnModuleInit {
       return;
     }
 
+    try {
+      if (this.panels && req) token = this.panels.resolve(req, token, role === 'publisher').token;
+    } catch {
+      this.sendAndClose(res, 'session_error', { message: '请验证房间密码或检查面板状态' });
+      return;
+    }
     const session = this.sessionService.getByToken(token);
     if (!session) {
       this.sendAndClose(res, 'session_error', {
@@ -81,6 +105,10 @@ export class SessionSseController implements OnModuleInit {
       return;
     }
 
+    if (session.platform === 'panel' && this.panels) {
+      try { this.panels.active(this.panels.panel(session.externalSpaceId).space); }
+      catch { this.sendAndClose(res, 'session_error', { message: '面板已停用' }); return; }
+    }
     if (session.status === 'ended') {
       this.sendAndClose(res, 'session_error', { message: 'share ended' });
       return;
@@ -104,6 +132,9 @@ export class SessionSseController implements OnModuleInit {
       this.sseClients.set(session.id, []);
     }
     this.sseClients.get(session.id)!.push({ res, role: resolvedRole, uid });
+    const analyticsPage = resolvedRole === 'viewer' ? 'view' : 'share';
+    const analyticsConnectionId = `${session.id}:${uid}`;
+    this.analytics.clientConnected(analyticsPage, analyticsConnectionId);
 
     this.logger.log(
       `SSE client connected: session=${session.id}, role=${resolvedRole}, uid=${uid.substring(0, 8)}`,
@@ -114,6 +145,7 @@ export class SessionSseController implements OnModuleInit {
     if (!latest || latest.status === 'ended') {
       res.write(`event: session_ended\ndata: ${JSON.stringify({ sessionId: session.id })}\n\n`);
       this.removeClient(session.id, res);
+      this.analytics.clientDisconnected(analyticsPage, analyticsConnectionId);
       res.end();
       return;
     }
@@ -125,13 +157,14 @@ export class SessionSseController implements OnModuleInit {
 
     // ===== 发布端心跳保活 =====
     let keepalive: ReturnType<typeof setInterval> | null = null;
-    if (resolvedRole === 'publisher') {
+    if (resolvedRole === 'publisher' && passive !== '1') {
       // 连接建立时立即更新心跳（同时触发 GRACE 恢复）
       this.sessionService.heartbeat(token);
 
       keepalive = setInterval(() => {
         try {
           this.sessionService.heartbeat(token);
+          this.analytics.clientHeartbeat(analyticsPage, analyticsConnectionId);
           res.write(': hb\n\n');
         } catch {
           // 连接已断开，清理由 close 事件处理
@@ -140,6 +173,7 @@ export class SessionSseController implements OnModuleInit {
     } else {
       keepalive = setInterval(() => {
         try {
+          this.analytics.clientHeartbeat(analyticsPage, analyticsConnectionId);
           res.write(': hb\n\n');
         } catch {
           // 连接已断开
@@ -165,6 +199,11 @@ export class SessionSseController implements OnModuleInit {
       // 最后一条同 viewerId 连接断开时结算本次观看区间
       if (wasViewer) {
         this.sessionService.viewerDisconnected(session.id, uid);
+      }
+      const stillConnected = (this.sseClients.get(session.id) || [])
+        .some((client) => client.role === resolvedRole && client.uid === uid);
+      if (!stillConnected) {
+        this.analytics.clientDisconnected(analyticsPage, analyticsConnectionId);
       }
     });
   }

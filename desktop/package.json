@@ -1,0 +1,14 @@
+{
+  "name": "xgoatcast-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "XgoatCast Windows screen sharing prototype",
+  "main": "main.cjs",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "start": "electron .",
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": { "agora-rtc-sdk-ng": "4.24.6" },
+  "devDependencies": { "electron": "44.3.0", "@electron/packager": "20.3.0", "esbuild": "0.28.2" }
+}

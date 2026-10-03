@@ -2,6 +2,7 @@ export type SessionStatus = 'pending' | 'active' | 'grace' | 'ended';
 
 export interface SessionInfo {
   id: string;
+  platform?: 'kook' | 'heychat' | 'qq' | 'discord' | 'panel';
   channel: string;
   sharerUsername: string;
   status: SessionStatus;
@@ -29,12 +30,15 @@ export interface SessionInfo {
     bitrateMax?: number;
   }>;
   publisherClientId?: string;
+  desktopLaunch?: { id: string; clientId: string; respondedAt: number };
   idleRemainingSec?: number;
   noViewerRemainingSec?: number;
   /** true=低延迟模式(rtc/互动直播)，false=极速直播(默认) */
   lowLatency?: boolean;
   /** 服务器是否允许开启低延迟模式 */
   allowLowLatency?: boolean;
+  /** 服务器是否允许切换画质优先 / 帧率优先 */
+  allowQualityPreference?: boolean;
 }
 
 export interface AgoraTokenResponse {

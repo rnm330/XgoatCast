@@ -1,0 +1,56 @@
+/** Shared source for the SES template download and SMTP HTML fallback. */
+export const VERIFICATION_EMAIL_TEMPLATE = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>Xgoat.Cast 邮箱验证</title>
+</head>
+<body style="margin:0;padding:0;width:100%;background-color:#f4f3f0;-webkit-text-size-adjust:100%;">
+  <div style="display:none;font-size:1px;line-height:1px;color:#f4f3f0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">完成邮箱验证，继续你的操作。验证码 10 分钟内有效，请勿向他人透露。</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f3f0" style="width:100%;border-collapse:collapse;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
+    <tr><td align="center" style="padding:32px 12px;">
+      <!--[if mso]><table role="presentation" width="560" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:560px;background-color:#ffffff;border:1px solid #e8e5df;border-radius:20px;border-spacing:0;">
+        <tr><td style="padding:28px 24px 24px;border-top:4px solid #f9733b;border-radius:20px 20px 0 0;">
+          <div style="font-size:18px;line-height:25px;font-weight:700;letter-spacing:-0.4px;color:#26231f;">Xgoat.Cast</div>
+          <div style="font-size:12px;line-height:20px;color:#78736b;">Xgoat.Cast 屏幕共享</div>
+        </td></tr>
+        <tr><td style="padding:0 24px;">
+          <div style="height:1px;line-height:1px;font-size:1px;background-color:#eeece7;">&nbsp;</div>
+        </td></tr>
+        <tr><td style="padding:28px 24px 0;">
+          <div style="font-size:12px;line-height:20px;font-weight:600;letter-spacing:2px;color:#a44720;">邮箱验证</div>
+          <h1 style="margin:8px 0 12px;font-size:26px;line-height:38px;font-weight:700;letter-spacing:-0.5px;color:#26231f;">再一步，即可继续</h1>
+          <p style="margin:0;font-size:15px;line-height:26px;color:#625e57;">你正在<strong style="font-weight:600;color:#26231f;">验证你的 Xgoat.Cast 账号</strong>。请在操作页面输入下方验证码，完成邮箱验证。</p>
+        </td></tr>
+        <tr><td style="padding:24px 24px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#fff7ef" style="width:100%;background-color:#fff7ef;border:1px solid #f4dac5;border-radius:14px;">
+            <tr><td align="center" style="padding:20px 12px 6px;font-size:12px;line-height:20px;color:#935230;">你的验证码</td></tr>
+            <tr><td align="center" style="padding:0 8px 10px 16px;white-space:nowrap;font-family:Consolas,'Courier New',monospace;font-size:34px;line-height:46px;font-weight:700;letter-spacing:8px;color:#a53c15;">{{code}}</td></tr>
+            <tr><td align="center" style="padding:0 12px 20px;font-size:12px;line-height:20px;color:#935230;">10 分钟内有效 · 仅可使用一次</td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:16px 24px 28px;">
+          <p style="margin:0;font-size:13px;line-height:23px;color:#78736b;">返回刚才的页面即可继续。若验证码已过期，请在页面重新获取。</p>
+        </td></tr>
+        <tr><td bgcolor="#faf9f6" style="padding:20px 24px 24px;background-color:#faf9f6;border-top:1px solid #eeece7;border-radius:0 0 20px 20px;">
+          <p style="margin:0 0 6px;font-size:13px;line-height:22px;font-weight:600;color:#514c44;">保护你的账号</p>
+          <p style="margin:0;font-size:12px;line-height:22px;color:#78736b;">请勿将验证码告诉任何人，包括自称工作人员的人。<br>如果这不是你本人的操作，请忽略此邮件，无需回复。</p>
+        </td></tr>
+      </table>
+      <!--[if mso]></td></tr></table><![endif]-->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;">
+        <tr><td align="center" style="padding:20px 12px 0;font-size:12px;line-height:22px;color:#817b72;">Xgoat.Cast · 让分享更简单<br>系统自动发送，请勿直接回复</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+`;
+
+export function verificationEmailHtml(code: string) {
+  const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+  return VERIFICATION_EMAIL_TEMPLATE.replace(/{{code}}/g, () => escape(code));
+}

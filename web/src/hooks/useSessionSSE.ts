@@ -23,7 +23,7 @@ interface SessionState {
  *   POST /api/share/start  { token, quality, clientId, lowLatency }
  *   POST /api/share/stop   { token }
  */
-export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
+export function useSessionSSE(token: string, role: 'publisher' | 'viewer', passive = false) {
   const esRef = useRef<EventSource | null>(null);
   const [state, setState] = useState<SessionState>({
     connected: false,
@@ -42,19 +42,35 @@ export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
     }
     viewerIdRef.current = vid;
   }
+  const publisherConnectionIdRef = useRef('');
+  if (!publisherConnectionIdRef.current && role === 'publisher') {
+    publisherConnectionIdRef.current = crypto.randomUUID();
+  }
 
   useEffect(() => {
     if (!token) return;
 
     // 构建 SSE URL
     const params = new URLSearchParams({ t: token, role });
+    if (passive) params.set('passive', '1');
     if (role === 'viewer') {
       params.set('vid', viewerIdRef.current);
+    } else {
+      params.set('cid', publisherConnectionIdRef.current);
     }
-    // publisher 的 clientId 由调用方通过 SharePage 的 cookie cid 来识别，
-    // 这里不需要额外传；服务端用 token 来关联 session
     const url = `/api/share/stream?${params.toString()}`;
 
+    let disposed = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let offline: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      disposed = true;
+      clearTimeout(retry); clearTimeout(offline);
+      esRef.current?.close();
+      setState(s => ({ ...s, ended: true, status: 'ended', connected: false }));
+    };
+    const connect = () => {
+    if (disposed) return;
     const es = new EventSource(url);
     esRef.current = es;
 
@@ -65,6 +81,7 @@ export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
     es.addEventListener('session_state', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
+        clearTimeout(offline); offline = undefined;
         setState((s) => ({
           ...s,
           status: data.status,
@@ -80,7 +97,7 @@ export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
     });
 
     es.addEventListener('session_ended', () => {
-      setState((s) => ({ ...s, ended: true, status: 'ended' }));
+      finish();
     });
 
     es.addEventListener('session_error', (e: MessageEvent) => {
@@ -90,21 +107,27 @@ export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
       } catch {
         console.error('session error');
       }
-      setState((s) => ({ ...s, ended: true, status: 'ended', connected: false }));
+      finish();
     });
 
     es.onerror = () => {
-      // EventSource 会自动重连；仅当 readyState === CLOSED 时标记断开
-      if (es.readyState === EventSource.CLOSED) {
-        setState((s) => ({ ...s, connected: false }));
-      }
+      // Some gateway errors permanently close native EventSource. Recreate it.
+      es.close();
+      if (disposed) return;
+      setState((s) => ({ ...s, connected: false }));
+      offline ||= setTimeout(finish, 120_000);
+      retry = setTimeout(connect, 1000 + Math.random() * 1000);
     };
+    };
+    connect();
 
     return () => {
-      es.close();
+      disposed = true;
+      clearTimeout(retry); clearTimeout(offline);
+      esRef.current?.close();
       esRef.current = null;
     };
-  }, [token, role]);
+  }, [token, role, passive]);
 
   // ===== 发布端操作（fetch POST） =====
 
@@ -113,13 +136,13 @@ export function useSessionSSE(token: string, role: 'publisher' | 'viewer') {
       quality?: string,
       clientId?: string,
       lowLatency?: boolean,
-    ): Promise<{ ok: boolean }> => {
+    ): Promise<{ ok: boolean; message?: string }> => {
       try {
         const resp = await api.startSharing(token, quality, clientId, lowLatency);
         return resp;
       } catch (e: any) {
         console.error('startSharing fetch error:', e);
-        return { ok: false };
+        return { ok: false, message: e?.message || '启动请求失败，请检查网络后重试。' };
       }
     },
     [token],

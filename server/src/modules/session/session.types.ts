@@ -1,3 +1,5 @@
+import type { PlatformKey } from '../platform/platform.types';
+
 export enum SessionStatus {
   PENDING = 'pending',
   ACTIVE = 'active',
@@ -14,8 +16,10 @@ export interface ShareSession {
   channel: string;
   sharerUserId: string;
   sharerUsername: string;
-  guildId: string;
-  targetChannelId: string;
+  platform: PlatformKey;
+  spaceId: string;
+  externalSpaceId: string;
+  externalChannelId: string;
   status: SessionStatus;
   viewerCount: number;
   peakViewers: number;
@@ -23,7 +27,7 @@ export interface ShareSession {
   /** 所有观众在 ACTIVE 状态下的累计在线毫秒；null 表示旧记录 */
   viewerDurationMs: number | null;
   quality: string;
-  cardMessageId?: string;
+  platformMessageId?: string;
   manualCreated: boolean;
   createdAt: number;
   startedAt: number | null;
@@ -97,6 +101,7 @@ export function getVideoCoefficient(tier: string, lowLatency: boolean): number {
 
 export interface SessionInfo {
   id: string;
+  platform: PlatformKey;
   channel: string;
   sharerUsername: string;
   status: SessionStatus;
@@ -130,6 +135,8 @@ export interface SessionInfo {
   lowLatency: boolean;
   /** 服务器是否允许开启低延迟模式 */
   allowLowLatency: boolean;
+  /** 服务器是否允许切换画质优先 / 帧率优先 */
+  allowQualityPreference?: boolean;
 }
 
 export interface StoredSessions {
@@ -199,6 +206,28 @@ export const QUALITY_PRESETS: QualityInfo[] = [
 export function getQualityInfo(key: string): QualityInfo {
   return QUALITY_PRESETS.find((q) => q.key === key) || QUALITY_PRESETS[2];
 }
+
+const ALL_QUALITY_KEYS = QUALITY_PRESETS.map((q) => q.key);
+
+/**
+ * 画质列表只清洗不拒绝：去掉未知/历史遗留的 key；清洗后为空则视为开放全部画质。
+ */
+export function sanitizeAllowedQualities(value: unknown): string[] {
+  if (!Array.isArray(value)) return [...ALL_QUALITY_KEYS];
+  const filtered = [...new Set(value.filter((key): key is string => typeof key === 'string' && ALL_QUALITY_KEYS.includes(key)))];
+  return filtered.length ? filtered : [...ALL_QUALITY_KEYS];
+}
+
+/** 数值只钳制不拒绝：非法值回退到 fallback，超范围收拢到边界。 */
+export function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+/** 会话关闭类秒数参数的统一边界：10 秒～600 秒。 */
+export const SESSION_CLOSE_SEC_MIN = 10;
+export const SESSION_CLOSE_SEC_MAX = 600;
 
 export type QualityBitrateConfig = Record<string, {
   bitrateMin?: number;

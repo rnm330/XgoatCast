@@ -16,6 +16,5 @@ import { KookWebhookWorker } from './kook-webhook.worker';
     KookWebhookRepository,
     KookWebhookWorker,
   ],
-  exports: [KookService],
 })
 export class KookModule {}

@@ -1,5 +1,7 @@
 # XgoatCast 部署指南
 
+QQ 群 Webhook、指令面板及绑定的配置与验收见 [QQ 接入说明](docs/QQ_INTEGRATION.md)。
+
 ## 前置条件
 
 - 服务器安装 Docker 和 Docker Compose
@@ -61,15 +63,28 @@ Docker 在线构建阶段只会安装服务端生产依赖，并把已上传的�
 6. 在 KOOK 后台填写相同的 Encrypt Key，完成 Challenge 后上线机器人
 7. 邀请机器人到 KOOK 服务器，机器人会自动同步服务器列表
 
-### 5. 服务器绑定（频道主操作）
+### 5. 服务器绑定（邀请人或服务器主操作）
 
-1. 机器人加入后自动向频道主发送绑定卡片
-2. 若未收到，频道主在 KOOK 频道发送 `/xchelp` 调起绑定
+1. 机器人加入后自动向本次邀请人和服务器主分别发送绑定卡片
+2. 若未收到，服务器主在 KOOK 频道发送 `/xchelp` 调起绑定
 3. 点击绑定卡片 → 设置管理密码 → 配置 Agora App ID 和 App Certificate
 
 ### 6. 开始使用
 
 频道内发送触发词（默认「屏幕共享」）→ 机器人推送卡片 → 点击开始共享。
+
+## Windows 客户端发版流程
+
+客户端只发布安装包，安装程序托管雨云对象存储，公开下载不占网站服务器带宽。详细步骤见 [客户端发版流程](docs/WINDOWS_CLIENT_RELEASE.md) 和 [雨云使用指南](docs/RAINYUN_OBJECT_STORAGE.md)。
+
+每次递增原生客户端版本、构建安装包并写更新日志后，在项目根目录执行：
+
+```bash
+npm run release:client -- --notes-file docs/releases/<版本>.md
+bash deploy.sh
+```
+
+第一条上传安装包并生成最新清单和历史日志，第二条发布全部网站及服务端改动。私密 S3 密钥只存 `.env.release` 或用户配置目录，网站部署不需要这些密钥。发布页、首页下载入口、分享页「下载共享客户端」、客户端「立即更新」统一指向 `/downloads.html`。
 
 ## 反向代理（推荐）
 

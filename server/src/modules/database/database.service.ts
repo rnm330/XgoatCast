@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import { getDefaultQualityBitrates, QualityBitrateConfig } from '../session/session.types';
 
 // ===== Types =====
@@ -11,6 +11,8 @@ export interface GlobalConfig {
   kookBotToken: string;
   kookVerifyToken: string;
   kookEncryptKey: string;
+  heychatBotId: string;
+  heychatBotToken: string;
   publicDomain: string;
   triggerWordLabels: string[];
   qualityBitrates: QualityBitrateConfig;
@@ -18,6 +20,7 @@ export interface GlobalConfig {
 }
 
 export interface KookWebhookEventRecord {
+  receivedAt: number;
   eventKey: string;
   sn: number | null;
   eventType: string;
@@ -45,11 +48,49 @@ export interface ServerRecord {
   heartbeatIntervalSec: number;
   noViewerTimeoutSec: number;
   publicDomain: string;
+  allowQualityPreference: number; // 1=允许共享者选择清晰度或帧率优先（默认）
   allowLowLatency: number; // 0=不允许低延迟模式，1=允许共享者切换
   reboundAt: number;      // 重新绑定时间戳（被踢出后重新绑定时记录，用于过滤旧会话）
   bindToken: string;      // 绑定临时 token
   bindTokenExpires: number; // 绑定 token 过期时间戳
   serverSecret: string;   // 每服务器独立的 HMAC 签名密钥
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateSpaceInput {
+  platform: string;
+  externalId: string;
+  /** Existing KOOK spaces keep guild_id as their internal ID for compatibility. */
+  spaceId?: string;
+  displayName: string;
+  ownerId: string;
+  ownerUsername?: string;
+  publicId?: string;
+}
+
+export type HeychatBindingIntentState = 'active' | 'authorized' | 'revoked' | 'expired';
+export type HeychatBindingClaimState = 'pending' | 'authorized' | 'revoked' | 'expired';
+
+export interface HeychatBindingIntentRecord {
+  intentId: string;
+  spaceId: string;
+  roomId: string;
+  ownerId: string;
+  state: HeychatBindingIntentState;
+  expiresAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface HeychatBindingClaimRecord {
+  claimId: string;
+  intentId: string;
+  roomId: string;
+  code: string;
+  state: HeychatBindingClaimState;
+  expiresAt: number;
+  authorizedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -129,6 +170,11 @@ export interface ServerSession {
   lowLatency: number; // 0=极速直播(默认)，1=低延迟模式(rtc)
 }
 
+const HEYCHAT_BIND_INTENT_TTL_MS = 10 * 60 * 1000;
+const HEYCHAT_BIND_CLAIM_TTL_MS = 10 * 60 * 1000;
+const HEYCHAT_BIND_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const HEYCHAT_BIND_CODE_LENGTH = 8;
+
 // ===== Service =====
 
 @Injectable()
@@ -157,7 +203,46 @@ export class DatabaseService implements OnModuleDestroy {
     }
   }
 
+  /** Integration repositories share transactions with space/session writes. */
+  get integrationDatabase(): Database.Database {
+    return this.db;
+  }
+
   private migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS panel_accounts (
+        id TEXT PRIMARY KEY COLLATE NOCASE,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        space_id TEXT NOT NULL UNIQUE REFERENCES servers(server_id) ON DELETE CASCADE,
+        access_hash TEXT NOT NULL DEFAULT '',
+        access_version INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS panel_rooms (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        panel_id TEXT NOT NULL REFERENCES panel_accounts(id) ON DELETE CASCADE,
+        view_token TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_panel_rooms_panel ON panel_rooms(panel_id, session_id);
+      CREATE TABLE IF NOT EXISTS panel_email_codes (
+        email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(email, purpose)
+      );
+      CREATE INDEX IF NOT EXISTS idx_panel_email_expiry ON panel_email_codes(expires_at);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS platform_card_jobs (
+        job_key TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        first_attempt_at INTEGER,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT NOT NULL DEFAULT ''
+      );
+    `);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS global_config (
         key   TEXT PRIMARY KEY,
@@ -213,6 +298,9 @@ export class DatabaseService implements OnModuleDestroy {
     if (!columns.some(c => c.name === 'status')) {
       this.db.exec(`ALTER TABLE servers ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
       this.logger.log('Added status column to servers table');
+    }
+    if (!columns.some(c => c.name === 'allow_quality_preference')) {
+      this.db.exec(`ALTER TABLE servers ADD COLUMN allow_quality_preference INTEGER NOT NULL DEFAULT 1`);
     }
     if (!columns.some(c => c.name === 'allow_low_latency')) {
       this.db.exec(`ALTER TABLE servers ADD COLUMN allow_low_latency INTEGER NOT NULL DEFAULT 0`);
@@ -300,6 +388,9 @@ export class DatabaseService implements OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
       CREATE INDEX IF NOT EXISTS idx_sessions_server_id ON sessions(server_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+      CREATE INDEX IF NOT EXISTS idx_sessions_space_status_created ON sessions(server_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sessions_space_created ON sessions(server_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_panel_live_sessions ON sessions(server_id, created_at DESC, id DESC) WHERE status IN ('active', 'grace');
 
       CREATE TABLE IF NOT EXISTS notices (
         id                TEXT PRIMARY KEY,
@@ -364,6 +455,39 @@ export class DatabaseService implements OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_kook_webhook_effect_status
       ON kook_webhook_effects(status, updated_at);
+
+      CREATE TABLE IF NOT EXISTS heychat_binding_intents (
+        intent_id   TEXT PRIMARY KEY,
+        space_id    TEXT NOT NULL,
+        room_id     TEXT NOT NULL,
+        owner_id    TEXT NOT NULL,
+        state       TEXT NOT NULL DEFAULT 'active',
+        expires_at  INTEGER NOT NULL,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        FOREIGN KEY (space_id) REFERENCES servers(server_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_heychat_binding_intents_room_state
+      ON heychat_binding_intents(room_id, state, expires_at);
+
+      CREATE TABLE IF NOT EXISTS heychat_binding_claims (
+        claim_id       TEXT PRIMARY KEY,
+        intent_id      TEXT NOT NULL,
+        room_id        TEXT NOT NULL,
+        secret_hash    TEXT NOT NULL,
+        code           TEXT NOT NULL,
+        state          TEXT NOT NULL DEFAULT 'pending',
+        expires_at     INTEGER NOT NULL,
+        authorized_at  INTEGER,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        UNIQUE (room_id, code),
+        FOREIGN KEY (intent_id) REFERENCES heychat_binding_intents(intent_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_heychat_binding_claims_intent_state
+      ON heychat_binding_claims(intent_id, state, expires_at);
     `);
 
     // Migrate sessions table: add low_latency column if missing
@@ -376,6 +500,205 @@ export class DatabaseService implements OnModuleDestroy {
       // 旧记录保留 NULL，计费展示时继续使用旧的峰值人数估算。
       this.db.exec(`ALTER TABLE sessions ADD COLUMN viewer_duration_ms INTEGER`);
       this.logger.log('Added viewer_duration_ms column to sessions table');
+    }
+
+    // Anonymous analytics storage. These tables intentionally contain no user,
+    // channel, token, IP address, client identifier, or raw user-agent fields.
+    const needsAnalyticsLegacyBackfill = !this.db.prepare(
+      "SELECT 1 FROM global_config WHERE key = 'analyticsLegacyBackfillV1'",
+    ).get();
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS analytics_share_records (
+        share_id                    TEXT PRIMARY KEY,
+        server_snowflake_id         TEXT NOT NULL,
+        server_name                 TEXT NOT NULL,
+        created_at                  INTEGER NOT NULL,
+        attributed_at               INTEGER NOT NULL,
+        first_started_at            INTEGER,
+        final_ended_at              INTEGER,
+        status                      TEXT NOT NULL DEFAULT 'pending',
+        end_reason                  TEXT NOT NULL DEFAULT '',
+        abnormal_end                INTEGER NOT NULL DEFAULT 0,
+        start_failure_reason        TEXT NOT NULL DEFAULT '',
+        peak_viewers                INTEGER NOT NULL DEFAULT 0,
+        duration_ms                 INTEGER NOT NULL DEFAULT 0,
+        viewer_joins                INTEGER NOT NULL DEFAULT 0,
+        viewer_duration_ms          INTEGER NOT NULL DEFAULT 0,
+        viewer_duration_estimated   INTEGER NOT NULL DEFAULT 0,
+        standard_minutes            REAL NOT NULL DEFAULT 0,
+        standard_minutes_estimated  INTEGER NOT NULL DEFAULT 1,
+        quality                     TEXT NOT NULL DEFAULT '1080p_2',
+        low_latency                 INTEGER NOT NULL DEFAULT 0,
+        updated_at                  INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_share_attributed
+      ON analytics_share_records(attributed_at DESC, share_id DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_share_status
+      ON analytics_share_records(status, attributed_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_share_server_time
+      ON analytics_share_records(server_snowflake_id, attributed_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_share_name_time
+      ON analytics_share_records(server_name COLLATE NOCASE, attributed_at DESC);
+
+      CREATE TABLE IF NOT EXISTS analytics_server_events (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key            TEXT NOT NULL UNIQUE,
+        server_snowflake_id  TEXT NOT NULL,
+        server_name          TEXT NOT NULL,
+        event_type           TEXT NOT NULL,
+        reason               TEXT NOT NULL DEFAULT '',
+        occurred_at          INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_server_events_time
+      ON analytics_server_events(occurred_at DESC, id DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_server_events_server_time
+      ON analytics_server_events(server_snowflake_id, occurred_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_server_events_name_time
+      ON analytics_server_events(server_name COLLATE NOCASE, occurred_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_server_events_type_time
+      ON analytics_server_events(event_type, occurred_at DESC);
+
+      -- Backfill the legacy server lifecycle log without carrying operator
+      -- identity or free-form details into anonymous analytics storage. Newer
+      -- releases briefly wrote both tables, so suppress an equivalent event
+      -- recorded for the same server within one second.
+      INSERT OR IGNORE INTO analytics_server_events (
+        event_key, server_snowflake_id, server_name,
+        event_type, reason, occurred_at
+      )
+      SELECT
+        'legacy_server_event:' || legacy.id,
+        legacy.server_id,
+        COALESCE(NULLIF(server.guild_name, ''), '未知服务器'),
+        CASE legacy.event_type
+          WHEN 'bot_kicked' THEN 'bot_removed'
+          WHEN 'bot_left' THEN 'bot_removed'
+          ELSE legacy.event_type
+        END,
+        '',
+        legacy.created_at
+      FROM server_events legacy
+      LEFT JOIN servers server ON server.server_id = legacy.server_id
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM analytics_server_events current
+        WHERE current.server_snowflake_id = legacy.server_id
+          AND current.event_key NOT LIKE 'legacy_server_event:%'
+          AND current.event_type = CASE legacy.event_type
+            WHEN 'bot_kicked' THEN 'bot_removed'
+            WHEN 'bot_left' THEN 'bot_removed'
+            ELSE legacy.event_type
+          END
+          AND ABS(current.occurred_at - legacy.created_at) <= 1000
+      );
+
+      CREATE TABLE IF NOT EXISTS analytics_coverage_snapshots (
+        snapshot_key             TEXT PRIMARY KEY,
+        captured_at              INTEGER NOT NULL,
+        total_member_count       INTEGER NOT NULL,
+        successful_server_count  INTEGER NOT NULL,
+        failed_server_count      INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_coverage_time
+      ON analytics_coverage_snapshots(captured_at DESC);
+
+      CREATE TABLE IF NOT EXISTS analytics_server_member_counts (
+        server_snowflake_id  TEXT PRIMARY KEY,
+        member_count         INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_member_counts_updated
+      ON analytics_server_member_counts(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS analytics_client_stats (
+        bucket_start   INTEGER NOT NULL,
+        page_type      TEXT NOT NULL,
+        device_type    TEXT NOT NULL,
+        os_name        TEXT NOT NULL,
+        browser_name   TEXT NOT NULL,
+        browser_major  TEXT NOT NULL,
+        count          INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (
+          bucket_start, page_type, device_type, os_name,
+          browser_name, browser_major
+        )
+      ) WITHOUT ROWID;
+
+      CREATE INDEX IF NOT EXISTS idx_analytics_client_stats_page_time
+      ON analytics_client_stats(page_type, bucket_start DESC);
+
+      -- One-time, idempotent anonymized backfill from legacy sessions. Only the
+      -- server snapshot and aggregate usage fields cross into analytics storage.
+      INSERT OR IGNORE INTO analytics_share_records (
+        share_id, server_snowflake_id, server_name, created_at, attributed_at,
+        first_started_at, final_ended_at, status, end_reason, abnormal_end,
+        duration_ms, viewer_joins, viewer_duration_ms,
+        viewer_duration_estimated, standard_minutes,
+        standard_minutes_estimated, quality, low_latency, updated_at
+      )
+      SELECT
+        s.id,
+        COALESCE(NULLIF(s.server_id, ''), NULLIF(s.guild_id, ''), ''),
+        COALESCE(NULLIF(v.guild_name, ''), '未知服务器'),
+        s.created_at,
+        COALESCE(s.started_at, s.created_at),
+        s.started_at,
+        s.ended_at,
+        CASE
+          WHEN s.ended_at IS NOT NULL THEN 'ended'
+          WHEN s.started_at IS NOT NULL THEN 'ongoing'
+          ELSE 'pending'
+        END,
+        CASE WHEN s.ended_at IS NOT NULL THEN 'legacy_unknown' ELSE '' END,
+        0,
+        COALESCE(s.duration_ms, 0),
+        COALESCE(s.total_viewer_joins, 0),
+        CASE
+          WHEN s.viewer_duration_ms IS NULL
+            THEN COALESCE(s.peak_viewers, 0) * COALESCE(s.duration_ms, 0)
+          ELSE s.viewer_duration_ms
+        END,
+        CASE WHEN s.viewer_duration_ms IS NULL THEN 1 ELSE 0 END,
+        0,
+        1,
+        COALESCE(NULLIF(s.quality, ''), '1080p_2'),
+        COALESCE(s.low_latency, 0),
+        COALESCE(s.ended_at, s.last_heartbeat, s.created_at)
+      FROM sessions s
+      LEFT JOIN servers v
+        ON v.server_id = COALESCE(NULLIF(s.server_id, ''), NULLIF(s.guild_id, ''))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM global_config WHERE key = 'analyticsLegacyBackfillV1'
+      );
+    `);
+    const analyticsShareCols = this.db.prepare(
+      'PRAGMA table_info(analytics_share_records)',
+    ).all() as any[];
+    if (!analyticsShareCols.some((column) => column.name === 'start_failure_reason')) {
+      this.db.exec("ALTER TABLE analytics_share_records ADD COLUMN start_failure_reason TEXT NOT NULL DEFAULT ''");
+    }
+    const addedPeakViewers = !analyticsShareCols.some((column) => column.name === 'peak_viewers');
+    if (addedPeakViewers) {
+      this.db.exec('ALTER TABLE analytics_share_records ADD COLUMN peak_viewers INTEGER NOT NULL DEFAULT 0');
+    }
+    if (needsAnalyticsLegacyBackfill) {
+      this.db.exec(`
+        UPDATE analytics_share_records
+        SET peak_viewers = COALESCE((
+          SELECT peak_viewers FROM sessions WHERE sessions.id = analytics_share_records.share_id
+        ), peak_viewers)
+        WHERE peak_viewers = 0;
+      `);
     }
 
     // Seed default global config if empty
@@ -392,6 +715,15 @@ export class DatabaseService implements OnModuleDestroy {
     ).run();
     this.db.prepare(
       "INSERT OR IGNORE INTO global_config (key, value) VALUES ('kookEncryptKey', '')",
+    ).run();
+    this.db.prepare(
+      "INSERT OR IGNORE INTO global_config (key, value) VALUES ('heychatBotToken', '')",
+    ).run();
+    this.db.prepare(
+      "INSERT OR IGNORE INTO global_config (key, value) VALUES ('heychatBotId', '')",
+    ).run();
+    this.db.prepare(
+      "INSERT OR IGNORE INTO global_config (key, value) VALUES ('analyticsLegacyBackfillV1', 'complete')",
     ).run();
 
     // Preserve every existing per-server trigger word when introducing the
@@ -413,6 +745,21 @@ export class DatabaseService implements OnModuleDestroy {
       if (!current || !current.value) {
         this.db.prepare("INSERT OR REPLACE INTO global_config (key, value) VALUES ('kookBotToken', ?)").run(process.env.KOOK_BOT_TOKEN);
         this.logger.log('Backfilled kookBotToken from KOOK_BOT_TOKEN env');
+      }
+    }
+
+    if (process.env.HEYCHAT_BOT_TOKEN) {
+      const current = this.db.prepare("SELECT value FROM global_config WHERE key = 'heychatBotToken'").get() as any;
+      if (!current || !current.value) {
+        this.db.prepare("INSERT OR REPLACE INTO global_config (key, value) VALUES ('heychatBotToken', ?)").run(process.env.HEYCHAT_BOT_TOKEN);
+        this.logger.log('Backfilled heychatBotToken from HEYCHAT_BOT_TOKEN env');
+      }
+    }
+    if (process.env.HEYCHAT_BOT_ID) {
+      const current = this.db.prepare("SELECT value FROM global_config WHERE key = 'heychatBotId'").get() as any;
+      if (!current || !current.value) {
+        this.db.prepare("INSERT OR REPLACE INTO global_config (key, value) VALUES ('heychatBotId', ?)").run(process.env.HEYCHAT_BOT_ID);
+        this.logger.log('Backfilled heychatBotId from HEYCHAT_BOT_ID env');
       }
     }
 
@@ -448,6 +795,7 @@ export class DatabaseService implements OnModuleDestroy {
       insertDefaultNotice();
       this.logger.log('Seeded default adaptive bitrate notice');
     }
+    this.db.pragma('optimize');
   }
 
   // ===== Global Config =====
@@ -460,6 +808,8 @@ export class DatabaseService implements OnModuleDestroy {
       kookBotToken: map.get('kookBotToken') || '',
       kookVerifyToken: map.get('kookVerifyToken') || '',
       kookEncryptKey: map.get('kookEncryptKey') || '',
+      heychatBotId: map.get('heychatBotId') || '',
+      heychatBotToken: map.get('heychatBotToken') || '',
       publicDomain: map.get('publicDomain') || 'http://localhost:3520',
       triggerWordLabels: this.parseTriggerWordLabels(map.get('triggerWordLabels')),
       qualityBitrates: this.parseQualityBitrates(map.get('qualityBitrates')),
@@ -599,6 +949,7 @@ export class DatabaseService implements OnModuleDestroy {
       noViewerTimeoutSec: row.no_viewer_timeout_sec,
       publicDomain: row.public_domain,
       allowLowLatency: row.allow_low_latency ?? 0,
+      allowQualityPreference: row.allow_quality_preference ?? 1,
       reboundAt: row.rebound_at ?? 0,
       bindToken: row.bind_token ?? '',
       bindTokenExpires: row.bind_token_expires ?? 0,
@@ -608,38 +959,68 @@ export class DatabaseService implements OnModuleDestroy {
     };
   }
 
-  /**
-   * 创建服务器记录
-   * @param serverId guild_id 雪花 ID（主键，用于 URL）
-   * @param guildName 服务器名称
-   * @param ownerId 服务器主 user_id
-   * @param ownerUsername 服务器主用户名
-   * @param openId open_id 公开 ID（用于面板显示）
-   */
-  createServer(serverId: string, guildName: string, ownerId: string, ownerUsername: string, openId?: string): ServerRecord {
+  /** Create or reactivate a platform-owned space without leaking platform semantics. */
+  createSpace(input: CreateSpaceInput): ServerRecord {
     const now = Date.now();
     const globalCfg = this.getGlobalConfig();
-    
-    // 检查是否是重新加入的服务器（之前被踢出）
-    const existing = this.getServer(serverId);
+
+    const platform = input.platform.trim().toLowerCase();
+    const externalId = input.externalId.trim();
+    if (!platform || !externalId) {
+      throw new Error('createSpace requires platform and externalId');
+    }
+
+    const existing = this.getSpace(platform, externalId);
     if (existing) {
       if (existing.status === 'kicked') {
-        // 重新激活被踢出的服务器
-        this.activateServer(serverId);
-        // 更新服务器信息
-        this.updateServer(serverId, {
-          guildName: guildName || existing.guildName,
-          ownerId: ownerId || existing.ownerId,
-          ownerUsername: ownerUsername || existing.ownerUsername,
-          openId: openId || existing.openId,
+        if (platform === 'heychat') {
+          // A Heychat rejoin starts a new administrative epoch. Even if the
+          // room owner did not change, never reactivate credentials preserved
+          // by a prior non-authoritative absence reconciliation.
+          const reactivate = this.db.transaction(() => {
+            this.db.prepare(`
+              UPDATE servers
+              SET status = 'active', guild_name = ?, owner_id = ?,
+                  owner_username = ?, open_id = ?, bound = 0,
+                  password_hash = '', bind_token = '', bind_token_expires = 0,
+                  server_secret = ?, updated_at = ?
+              WHERE server_id = ?
+            `).run(
+              input.displayName || existing.guildName,
+              input.ownerId || existing.ownerId,
+              input.ownerUsername || existing.ownerUsername,
+              input.publicId || existing.openId,
+              randomBytes(32).toString('hex'),
+              now,
+              existing.serverId,
+            );
+            this.db.prepare(
+              'DELETE FROM heychat_binding_intents WHERE space_id = ?',
+            ).run(existing.serverId);
+          });
+          reactivate();
+          this.logger.log(`Reactivated ${platform} space ${externalId} with a fresh admin epoch`);
+          return this.getServer(existing.serverId)!;
+        }
+        this.activateServer(existing.serverId);
+        this.updateServer(existing.serverId, {
+          guildName: input.displayName || existing.guildName,
+          ownerId: input.ownerId || existing.ownerId,
+          ownerUsername: input.ownerUsername || existing.ownerUsername,
+          openId: input.publicId || existing.openId,
         });
-        this.logger.log(`Reactivated kicked server ${serverId}`);
-        return this.getServer(serverId)!;
+        this.logger.log(`Reactivated ${platform} space ${externalId}`);
+        return this.getServer(existing.serverId)!;
       }
-      // 已存在的活跃服务器，直接返回
       return existing;
     }
-    
+
+    const spaceId = input.spaceId || `${platform}:${externalId}`;
+    const collision = this.getServer(spaceId);
+    if (collision) {
+      throw new Error(`Internal space ID collision: ${spaceId}`);
+    }
+
     const serverSecret = randomBytes(32).toString('hex');
     this.db.prepare(`
       INSERT INTO servers (
@@ -647,21 +1028,35 @@ export class DatabaseService implements OnModuleDestroy {
         owner_username, bound, status, public_domain, trigger_words,
         server_secret, created_at, updated_at
       )
-      VALUES (?, 'kook', ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?)
     `).run(
-      serverId,
-      serverId,
-      openId || '',
-      guildName,
-      ownerId,
-      ownerUsername,
+      spaceId,
+      platform,
+      externalId,
+      input.publicId || '',
+      input.displayName,
+      input.ownerId,
+      input.ownerUsername || '',
       globalCfg.publicDomain,
       globalCfg.triggerWordLabels.join(','),
       serverSecret,
       now,
       now,
     );
-    return this.getServer(serverId)!;
+    return this.getServer(spaceId)!;
+  }
+
+  /** @deprecated KOOK compatibility wrapper. New integrations must use createSpace. */
+  createServer(serverId: string, guildName: string, ownerId: string, ownerUsername: string, openId?: string): ServerRecord {
+    return this.createSpace({
+      platform: 'kook',
+      externalId: serverId,
+      spaceId: serverId,
+      displayName: guildName,
+      ownerId,
+      ownerUsername,
+      publicId: openId,
+    });
   }
 
   private readonly ALLOWED_SERVER_COLS = new Set([
@@ -670,15 +1065,14 @@ export class DatabaseService implements OnModuleDestroy {
     'agora_app_id', 'agora_app_certificate', 'agora_token_expire_sec',
     'allowed_qualities', 'trigger_words',
     'idle_timeout_sec', 'heartbeat_interval_sec', 'no_viewer_timeout_sec',
-    'public_domain', 'allow_low_latency',
+    'public_domain', 'allow_low_latency', 'allow_quality_preference',
     'rebound_at', 'bind_token', 'bind_token_expires',
     'server_secret',
     'updated_at',
   ]);
 
   updateServer(serverId: string, fields: Partial<ServerRecord>): void {
-    const sets: string[] = [];
-    const values: any[] = [];
+    const columns = new Map<string, unknown>();
     for (const [key, val] of Object.entries(fields)) {
       if (key === 'serverId') continue;
       const col = key.replace(/([A-Z])/g, '_$1').toLowerCase();
@@ -686,20 +1080,83 @@ export class DatabaseService implements OnModuleDestroy {
         this.logger.warn(`updateServer: rejected unknown column "${col}"`);
         continue;
       }
-      sets.push(`${col} = ?`);
-      values.push(val);
+      columns.set(col, val);
     }
-    if (sets.length === 0) return;
+    if (columns.size === 0) return;
+
+    const current = this.getServer(serverId);
+    const nextOwnerId = columns.has('owner_id') ? String(columns.get('owner_id') || '') : null;
+    const heychatOwnerChanged = !!current
+      && current.platform === 'heychat'
+      && nextOwnerId !== null
+      && nextOwnerId !== current.ownerId;
+    if (heychatOwnerChanged) {
+      // An ownership epoch change invalidates every prior browser/admin
+      // capability. Reset binding as well as rotating the JWT signing key so
+      // the previous owner's password cannot mint a fresh token.
+      columns.set('bound', 0);
+      columns.set('password_hash', '');
+      columns.set('bind_token', '');
+      columns.set('bind_token_expires', 0);
+      columns.set('server_secret', randomBytes(32).toString('hex'));
+    }
+
+    const sets = [...columns.keys()].map((column) => `${column} = ?`);
+    const values = [...columns.values()];
     sets.push('updated_at = ?');
-    values.push(Date.now());
-    values.push(serverId);
-    this.db.prepare(`UPDATE servers SET ${sets.join(', ')} WHERE server_id = ?`).run(...values);
+    values.push(Date.now(), serverId);
+    const update = this.db.transaction(() => {
+      this.db.prepare(`UPDATE servers SET ${sets.join(', ')} WHERE server_id = ?`).run(...values);
+      if (heychatOwnerChanged) {
+        this.db.prepare('DELETE FROM heychat_binding_intents WHERE space_id = ?').run(serverId);
+      }
+    });
+    update();
   }
 
   /** 标记服务器为已踢出，重置绑定状态（不删除记录） */
   kickServer(serverId: string): void {
-    this.db.prepare("UPDATE servers SET status = 'kicked', bound = 0, password_hash = '', updated_at = ? WHERE server_id = ?").run(Date.now(), serverId);
+    const current = this.getServer(serverId);
+    if (current?.platform !== 'heychat') {
+      // Preserve the established KOOK credential lifecycle. Heychat's device
+      // claims and ownership epochs must not alter KOOK rejoin semantics.
+      this.db.prepare(`
+        UPDATE servers
+        SET status = 'kicked', bound = 0, password_hash = '', updated_at = ?
+        WHERE server_id = ?
+      `).run(Date.now(), serverId);
+      this.logger.log(`Marked server ${serverId} as kicked, reset binding state`);
+      return;
+    }
+
+    const revoke = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE servers
+        SET status = 'kicked', bound = 0, password_hash = '',
+            bind_token = '', bind_token_expires = 0, server_secret = ?, updated_at = ?
+        WHERE server_id = ?
+      `).run(randomBytes(32).toString('hex'), Date.now(), serverId);
+      this.db.prepare('DELETE FROM heychat_binding_intents WHERE space_id = ?').run(serverId);
+    });
+    revoke();
     this.logger.log(`Marked server ${serverId} as kicked, reset binding state`);
+  }
+
+  /**
+   * API reconciliation only knows that the bot is no longer present. Preserve
+   * binding/password/Agora settings so a later rejoin can reactivate the space
+   * without destroying administrator-owned configuration.
+   */
+  markServerAbsentPreservingBinding(serverId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE servers
+      SET status = 'kicked', updated_at = ?
+      WHERE server_id = ? AND status = 'active'
+    `).run(Date.now(), serverId);
+    if (result.changes > 0) {
+      this.logger.log(`Marked server ${serverId} as absent, preserved binding state`);
+    }
+    return result.changes > 0;
   }
 
   /** 恢复服务器为活跃状态（机器人重新加入） */
@@ -731,6 +1188,292 @@ export class DatabaseService implements OnModuleDestroy {
   clearBindToken(serverId: string): void {
     this.db.prepare("UPDATE servers SET bind_token = '', bind_token_expires = 0, updated_at = ? WHERE server_id = ?")
       .run(Date.now(), serverId);
+  }
+
+  /**
+   * Start a browser-device binding flow for one active, unbound Heychat room.
+   * The returned intent ID is deliberately only a locator; possession never
+   * authorizes binding. A browser must create and later consume its own claim.
+   */
+  createHeychatBindingIntent(
+    roomId: string,
+    ttlMs = HEYCHAT_BIND_INTENT_TTL_MS,
+  ): HeychatBindingIntentRecord | undefined {
+    const space = this.getSpace('heychat', roomId);
+    if (!space || space.status !== 'active' || !!space.bound || !space.ownerId) return undefined;
+    const now = Date.now();
+    const expiresAt = now + this.clampBindingTtl(ttlMs, HEYCHAT_BIND_INTENT_TTL_MS);
+    const intentId = randomBytes(24).toString('base64url');
+    const create = this.db.transaction(() => {
+      // Device binding supersedes the retired Heychat URL-token flow. Clear
+      // any token left by an older process before exposing the new intent.
+      this.db.prepare(`
+        UPDATE servers
+        SET bind_token = '', bind_token_expires = 0, updated_at = ?
+        WHERE server_id = ? AND platform = 'heychat'
+      `).run(now, space.serverId);
+      this.db.prepare(`
+        UPDATE heychat_binding_claims
+        SET state = 'revoked', updated_at = ?
+        WHERE room_id = ? AND state IN ('pending', 'authorized')
+      `).run(now, roomId);
+      this.db.prepare(`
+        UPDATE heychat_binding_intents
+        SET state = 'revoked', updated_at = ?
+        WHERE room_id = ? AND state IN ('active', 'authorized')
+      `).run(now, roomId);
+      this.db.prepare(`
+        INSERT INTO heychat_binding_intents (
+          intent_id, space_id, room_id, owner_id, state,
+          expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(intentId, space.serverId, roomId, space.ownerId, expiresAt, now, now);
+    });
+    create();
+    return this.getHeychatBindingIntent(roomId, intentId);
+  }
+
+  getHeychatBindingIntent(
+    roomId: string,
+    intentId: string,
+  ): HeychatBindingIntentRecord | undefined {
+    const row = this.db.prepare(`
+      SELECT i.*
+      FROM heychat_binding_intents i
+      INNER JOIN servers s ON s.server_id = i.space_id
+      WHERE i.intent_id = ? AND i.room_id = ? AND s.platform = 'heychat'
+    `).get(intentId, roomId) as any;
+    if (!row) return undefined;
+    return this.mapHeychatBindingIntent(row);
+  }
+
+  /** Create one browser claim. secretHash must be SHA-256 hex; raw secrets never enter SQLite. */
+  createHeychatBindingClaim(
+    roomId: string,
+    intentId: string,
+    secretHash: string,
+    ttlMs = HEYCHAT_BIND_CLAIM_TTL_MS,
+  ): HeychatBindingClaimRecord | undefined {
+    if (!/^[a-f0-9]{64}$/.test(secretHash)) return undefined;
+    const now = Date.now();
+    const intent = this.getHeychatBindingIntent(roomId, intentId);
+    const space = this.getSpace('heychat', roomId);
+    if (
+      !intent || intent.state !== 'active' || intent.expiresAt <= now
+      || !space || space.serverId !== intent.spaceId
+      || space.status !== 'active' || !!space.bound
+      || space.ownerId !== intent.ownerId
+    ) return undefined;
+
+    const claimId = randomBytes(24).toString('base64url');
+    const expiresAt = Math.min(
+      intent.expiresAt,
+      now + this.clampBindingTtl(ttlMs, HEYCHAT_BIND_CLAIM_TTL_MS),
+    );
+    const create = this.db.transaction((): HeychatBindingClaimRecord | undefined => {
+      const current = this.db.prepare(`
+        SELECT i.intent_id
+        FROM heychat_binding_intents i
+        INNER JOIN servers s ON s.server_id = i.space_id
+        WHERE i.intent_id = ? AND i.room_id = ? AND i.owner_id = s.owner_id
+          AND i.state = 'active' AND i.expires_at > ?
+          AND s.platform = 'heychat' AND s.status = 'active' AND s.bound = 0
+      `).get(intentId, roomId, now);
+      if (!current) return undefined;
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const code = this.generateHeychatBindingCode();
+        try {
+          this.db.prepare(`
+            INSERT INTO heychat_binding_claims (
+              claim_id, intent_id, room_id, secret_hash, code, state,
+              expires_at, authorized_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
+          `).run(claimId, intentId, roomId, secretHash, code, expiresAt, now, now);
+          return this.getHeychatBindingClaim(roomId, intentId, claimId, secretHash);
+        } catch (error: any) {
+          if (!String(error?.message || error).includes('UNIQUE constraint failed')) throw error;
+        }
+      }
+      throw new Error('Unable to allocate a unique Heychat binding code');
+    });
+    return create();
+  }
+
+  getHeychatBindingClaim(
+    roomId: string,
+    intentId: string,
+    claimId: string,
+    secretHash: string,
+  ): HeychatBindingClaimRecord | undefined {
+    if (!/^[a-f0-9]{64}$/.test(secretHash)) return undefined;
+    const row = this.db.prepare(`
+      SELECT c.*
+      FROM heychat_binding_claims c
+      INNER JOIN heychat_binding_intents i ON i.intent_id = c.intent_id
+      WHERE c.claim_id = ? AND c.intent_id = ? AND c.room_id = ?
+        AND c.secret_hash = ? AND i.room_id = c.room_id
+    `).get(claimId, intentId, roomId, secretHash) as any;
+    if (!row) return undefined;
+    return this.mapHeychatBindingClaim(row);
+  }
+
+  /** Called by the trusted Heychat /xchelp command path when it includes a code. */
+  authorizeHeychatBindingClaim(
+    roomId: string,
+    code: string,
+    confirmerUserId: string,
+  ): HeychatBindingClaimRecord | undefined {
+    const normalizedCode = code.trim().toUpperCase();
+    if (!new RegExp(`^[${HEYCHAT_BIND_CODE_ALPHABET}]{${HEYCHAT_BIND_CODE_LENGTH}}$`).test(normalizedCode)) {
+      return undefined;
+    }
+    const now = Date.now();
+    const authorize = this.db.transaction((): HeychatBindingClaimRecord | undefined => {
+      const row = this.db.prepare(`
+        SELECT c.*, i.space_id, i.owner_id
+        FROM heychat_binding_claims c
+        INNER JOIN heychat_binding_intents i ON i.intent_id = c.intent_id
+        INNER JOIN servers s ON s.server_id = i.space_id
+        WHERE c.room_id = ? AND c.code = ? AND c.state = 'pending'
+          AND c.expires_at > ? AND i.state = 'active' AND i.expires_at > ?
+          AND i.owner_id = ? AND s.owner_id = ?
+          AND s.platform = 'heychat' AND s.external_id = ?
+          AND s.status = 'active' AND s.bound = 0
+      `).get(
+        roomId,
+        normalizedCode,
+        now,
+        now,
+        confirmerUserId,
+        confirmerUserId,
+        roomId,
+      ) as any;
+      if (!row) return undefined;
+
+      this.db.prepare(`
+        UPDATE heychat_binding_claims
+        SET state = 'revoked', updated_at = ?
+        WHERE intent_id = ? AND claim_id != ? AND state IN ('pending', 'authorized')
+      `).run(now, row.intent_id, row.claim_id);
+      const selected = this.db.prepare(`
+        UPDATE heychat_binding_claims
+        SET state = 'authorized', authorized_at = ?, updated_at = ?
+        WHERE claim_id = ? AND state = 'pending'
+      `).run(now, now, row.claim_id);
+      if (selected.changes !== 1) return undefined;
+      this.db.prepare(`
+        UPDATE heychat_binding_intents
+        SET state = 'authorized', updated_at = ?
+        WHERE intent_id = ? AND state = 'active'
+      `).run(now, row.intent_id);
+
+      return this.getHeychatBindingClaimById(row.claim_id);
+    });
+    return authorize();
+  }
+
+  /**
+   * Atomically consume one authorized browser claim and bind the room. Success
+   * removes every intent/claim for the space and starts a fresh admin-key epoch.
+   */
+  consumeHeychatBindingClaim(
+    roomId: string,
+    intentId: string,
+    claimId: string,
+    secretHash: string,
+    passwordHash: string,
+  ): ServerRecord | undefined {
+    if (!/^[a-f0-9]{64}$/.test(secretHash) || !passwordHash) return undefined;
+    const now = Date.now();
+    const consume = this.db.transaction((): string | undefined => {
+      const row = this.db.prepare(`
+        SELECT i.space_id
+        FROM heychat_binding_claims c
+        INNER JOIN heychat_binding_intents i ON i.intent_id = c.intent_id
+        INNER JOIN servers s ON s.server_id = i.space_id
+        WHERE c.claim_id = ? AND c.intent_id = ? AND c.room_id = ?
+          AND c.secret_hash = ? AND c.state = 'authorized' AND c.expires_at > ?
+          AND i.state = 'authorized' AND i.expires_at > ?
+          AND s.platform = 'heychat' AND s.external_id = ?
+          AND s.status = 'active' AND s.bound = 0 AND s.owner_id = i.owner_id
+      `).get(claimId, intentId, roomId, secretHash, now, now, roomId) as any;
+      if (!row) return undefined;
+
+      const bound = this.db.prepare(`
+        UPDATE servers
+        SET password_hash = ?, bound = 1, rebound_at = ?,
+            bind_token = '', bind_token_expires = 0,
+            server_secret = ?, updated_at = ?
+        WHERE server_id = ? AND platform = 'heychat'
+          AND external_id = ? AND status = 'active' AND bound = 0
+      `).run(
+        passwordHash,
+        now,
+        randomBytes(32).toString('hex'),
+        now,
+        row.space_id,
+        roomId,
+      );
+      if (bound.changes !== 1) return undefined;
+      this.db.prepare('DELETE FROM heychat_binding_intents WHERE space_id = ?').run(row.space_id);
+      return String(row.space_id);
+    });
+    const spaceId = consume();
+    return spaceId ? this.getServer(spaceId) : undefined;
+  }
+
+  private getHeychatBindingClaimById(claimId: string): HeychatBindingClaimRecord | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM heychat_binding_claims WHERE claim_id = ?',
+    ).get(claimId) as any;
+    return row ? this.mapHeychatBindingClaim(row) : undefined;
+  }
+
+  private mapHeychatBindingIntent(row: any): HeychatBindingIntentRecord {
+    const state = row.expires_at <= Date.now() && row.state !== 'revoked'
+      ? 'expired'
+      : row.state;
+    return {
+      intentId: String(row.intent_id),
+      spaceId: String(row.space_id),
+      roomId: String(row.room_id),
+      ownerId: String(row.owner_id),
+      state,
+      expiresAt: Number(row.expires_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private mapHeychatBindingClaim(row: any): HeychatBindingClaimRecord {
+    const state = row.expires_at <= Date.now() && row.state !== 'revoked'
+      ? 'expired'
+      : row.state;
+    return {
+      claimId: String(row.claim_id),
+      intentId: String(row.intent_id),
+      roomId: String(row.room_id),
+      code: String(row.code),
+      state,
+      expiresAt: Number(row.expires_at),
+      authorizedAt: row.authorized_at == null ? null : Number(row.authorized_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private generateHeychatBindingCode(): string {
+    let code = '';
+    for (let index = 0; index < HEYCHAT_BIND_CODE_LENGTH; index += 1) {
+      code += HEYCHAT_BIND_CODE_ALPHABET[randomInt(HEYCHAT_BIND_CODE_ALPHABET.length)];
+    }
+    return code;
+  }
+
+  private clampBindingTtl(value: number, maximum: number): number {
+    if (!Number.isFinite(value) || value <= 0) return maximum;
+    return Math.max(30_000, Math.min(Math.floor(value), maximum));
   }
 
   /** 获取指定服务器本次绑定后的会话列表（reboundAt > 0 时过滤旧会话） */
@@ -799,6 +1542,16 @@ export class DatabaseService implements OnModuleDestroy {
     return rows.map(row => this.mapSessionRow(row));
   }
 
+  getActiveSessionsByPlatformUser(platform: string, sharerUserId: string): ServerSession[] {
+    const rows = this.db.prepare(`
+      SELECT s.*
+      FROM sessions s
+      INNER JOIN servers v ON v.server_id = s.server_id
+      WHERE v.platform = ? AND s.sharer_user_id = ? AND s.status != 'ended'
+    `).all(platform, sharerUserId) as any[];
+    return rows.map(row => this.mapSessionRow(row));
+  }
+
   getSessionsByServer(serverId: string): ServerSession[] {
     const rows = this.db.prepare('SELECT * FROM sessions WHERE server_id = ? ORDER BY created_at DESC').all(serverId) as any[];
     return rows.map(row => this.mapSessionRow(row));
@@ -806,6 +1559,13 @@ export class DatabaseService implements OnModuleDestroy {
 
   getAllSessions(): ServerSession[] {
     const rows = this.db.prepare('SELECT * FROM sessions ORDER BY created_at DESC').all() as any[];
+    return rows.map(row => this.mapSessionRow(row));
+  }
+
+  getUnfinishedSessions(): ServerSession[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM sessions WHERE status != 'ended' ORDER BY created_at DESC",
+    ).all() as any[];
     return rows.map(row => this.mapSessionRow(row));
   }
 
@@ -944,7 +1704,7 @@ export class DatabaseService implements OnModuleDestroy {
     const claim = this.db.transaction(() => {
       const now = Date.now();
       const row = this.db.prepare(`
-        SELECT event_key, sn, event_type, payload, attempts
+        SELECT event_key, sn, event_type, payload, attempts, received_at
         FROM kook_webhook_events
         WHERE status = 'pending' AND next_attempt_at <= ?
         ORDER BY received_at ASC
@@ -963,6 +1723,7 @@ export class DatabaseService implements OnModuleDestroy {
         eventType: row.event_type || '',
         payload: row.payload,
         attempts: Number(row.attempts) + 1,
+        receivedAt: Number(row.received_at),
       } as KookWebhookEventRecord;
     });
     return claim();
@@ -1103,6 +1864,56 @@ export class DatabaseService implements OnModuleDestroy {
       uncertain: map.get('uncertain') || 0,
       oldestPendingAt: oldest?.received_at == null ? null : Number(oldest.received_at),
     };
+  }
+
+  // ===== Anonymous analytics repository primitives =====
+
+  /** Execute a fixed analytics mutation. SQL is authored only by AnalyticsService. */
+  enqueueCardJob(key: string, payload: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO platform_card_jobs (job_key, payload) VALUES (?, ?)').run(key, payload);
+  }
+
+  getDueCardJobs(now = Date.now()): Array<{ job_key: string; payload: string; attempts: number; first_attempt_at: number | null }> {
+    return this.db.prepare("SELECT * FROM platform_card_jobs WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT 20").all(now) as any;
+  }
+
+  beginCardJob(key: string, now: number): void {
+    this.db.prepare('UPDATE platform_card_jobs SET attempts = attempts + 1, first_attempt_at = COALESCE(first_attempt_at, ?), next_attempt_at = ? WHERE job_key = ?').run(now, now + 5_000, key);
+  }
+
+  retryCardJob(key: string, nextAt: number, error: string, state = 'pending'): void {
+    this.db.prepare('UPDATE platform_card_jobs SET next_attempt_at = ?, last_error = ?, state = ? WHERE job_key = ?').run(nextAt, error.slice(0, 500), state, key);
+  }
+
+  getCardJobSummary(): Record<string, number> {
+    const rows = this.db.prepare('SELECT state, COUNT(*) AS count FROM platform_card_jobs GROUP BY state').all() as Array<{ state: string; count: number }>;
+    return Object.fromEntries(rows.map(row => [row.state, row.count]));
+  }
+
+  completeCardJob(key: string): void {
+    this.db.prepare('DELETE FROM platform_card_jobs WHERE job_key = ?').run(key);
+  }
+
+  runAnalytics(sql: string, params: readonly unknown[] = []): number {
+    return this.db.prepare(sql).run(...params).changes;
+  }
+
+  /** Read one row using a fixed analytics query authored by AnalyticsService. */
+  getAnalyticsRow<T = any>(sql: string, params: readonly unknown[] = []): T | undefined {
+    return this.db.prepare(sql).get(...params) as T | undefined;
+  }
+
+  /** Read rows using a fixed analytics query authored by AnalyticsService. */
+  getAnalyticsRows<T = any>(sql: string, params: readonly unknown[] = []): T[] {
+    return this.db.prepare(sql).all(...params) as T[];
+  }
+
+  runAnalyticsTransaction<T>(operation: () => T): T {
+    return this.db.transaction(operation)();
+  }
+
+  optimizeAnalytics(): void {
+    this.db.pragma('optimize');
   }
 
   cleanupKookWebhookEvents(doneBefore: number, deadBefore: number): number {

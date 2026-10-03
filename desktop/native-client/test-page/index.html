@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>XgoatCast 客户端测试</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0f1020;--card:#191a30;--soft:#24253d;--orange:#ff8c42;--text:#f3f2fa;--muted:#a0a3b8;--ok:#5fd29a;--bad:#ff8f84}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 70% 0,#2b1e3d 0,transparent 36%),var(--bg);font:14px/1.6 system-ui,"Microsoft YaHei UI",sans-serif;color:var(--text)}main{width:min(920px,calc(100% - 32px));margin:38px auto}.head{display:flex;align-items:center;gap:14px;margin-bottom:24px}.logo{width:44px;height:44px;border-radius:14px;background:var(--orange);color:#17182b;font:bold 26px/44px sans-serif;text-align:center}.head h1{font-size:20px;margin:0}.head p{color:var(--muted);margin:1px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:rgba(25,26,48,.86);border:1px solid #ffffff13;border-radius:20px;padding:22px;box-shadow:0 20px 60px #0005;backdrop-filter:blur(18px)}h2{font-size:15px;margin:0 0 14px}button{width:100%;border:0;border-radius:13px;padding:13px 16px;font:600 14px inherit;cursor:pointer;color:var(--text);background:var(--soft);margin-top:10px}button.primary{color:#1b1720;background:linear-gradient(120deg,#ff7a38,var(--orange))}button:disabled{opacity:.45;cursor:not-allowed}.status{display:flex;align-items:center;gap:9px;padding:11px 13px;border-radius:12px;background:#ffffff08;color:var(--muted)}.dot{width:9px;height:9px;border-radius:50%;background:#7b7e92}.dot.ok{background:var(--ok);box-shadow:0 0 14px #5fd29a99}.dot.bad{background:var(--bad)}label{display:block;color:var(--muted);font-size:12px;margin-top:15px}select{width:100%;margin-top:5px;padding:10px;border:1px solid #ffffff18;border-radius:11px;background:#111226;color:var(--text)}code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:10px;padding:9px 11px;border-radius:10px;background:#090a15;color:#c8cad8;font-size:11px}.video{aspect-ratio:16/9;background:#090a15;border-radius:14px;overflow:hidden;margin-top:14px;display:grid;place-items:center;color:#696c82}.video>div{width:100%;height:100%}.hint{font-size:12px;color:var(--muted);margin:12px 0 0}.warning{color:#ffbd8e}.row{display:flex;gap:10px}.row button{flex:1}.meta{margin-top:16px;font-size:12px;color:var(--muted)}@media(max-width:720px){.grid{grid-template-columns:1fr}main{margin-top:22px}}
+  </style>
+</head>
+<body><main>
+  <div class="head"><div class="logo">X</div><div><h1>XgoatCast 客户端测试</h1><p>本地临时会话 · 证书只在测试后台使用</p></div></div>
+  <div class="grid">
+    <section class="card">
+      <h2>1. 调起客户端</h2>
+      <div class="status"><i id="publishDot" class="dot"></i><span id="publishText">正在创建测试会话…</span></div>
+      <button id="launch" class="primary" disabled>调起 Windows 客户端</button>
+      <div class="row"><button id="newSession">新建测试会话</button><button id="stop">停止测试共享</button></div>
+      <code id="uri">等待生成调起地址</code>
+      <p class="hint">首次启动客户端会弹出「启用网页唤起」。启用后浏览器会询问是否打开 XgoatCast；画质、屏幕或窗口都在客户端内选择。</p>
+      <p class="hint warning">此页只监听本机，不会显示或下发 App Certificate。关闭服务后内存会话立即消失。</p>
+    </section>
+    <section class="card">
+      <h2>2. 观看实际测试流</h2>
+      <div class="status"><i id="watchDot" class="dot"></i><span id="watchText">等待客户端开始共享</span></div>
+      <div class="video" id="video">远端画面会显示在这里</div>
+      <button id="watch" disabled>加入观看</button>
+      <p class="hint">点击观看属于用户操作，可同时允许浏览器播放远端软件声音。若切换了低延迟模式，请停止观看后重新加入。</p>
+      <div class="meta" id="meta"></div>
+    </section>
+  </div>
+</main><script src="/agora-sdk.js"></script><script>
+  const $=id=>document.getElementById(id);let current=null,client=null,watching=false;
+  const clientId=sessionStorage.getItem('xc_native_test_cid')||crypto.randomUUID();sessionStorage.setItem('xc_native_test_cid',clientId);
+  function launchUri(){const p=new URLSearchParams({server:location.origin,t:current.token,cid:clientId});return 'xgoatcast://share?'+p}
+  async function api(path,options){const response=await fetch(path,options);const value=await response.json();if(!response.ok)throw Error(value.message||'请求失败');return value}
+  async function create(){if(watching)await leave();current=await api('/test/session',{method:'POST'});$('launch').disabled=false;$('uri').textContent=launchUri();render(await api('/test/session'))}
+  function render(s){current={...current,...s};const active=s.status==='active';$('publishDot').className='dot '+(active?'ok':'');$('publishText').textContent=active?'客户端正在共享':'客户端尚未开始共享';$('watch').disabled=!active;const requests=s.requests?` · 客户端请求 info ${s.requests.info} / token ${s.requests.token}`:'';$('meta').textContent='频道：'+s.channel+' · 模式：'+(s.lowLatency?'低延迟 RTC':'直播')+' · '+(s.quality||'等待客户端选择')+requests}
+  async function poll(){try{render(await api('/test/session'))}catch(e){$('publishDot').className='dot bad';$('publishText').textContent=e.message}}
+  async function leave(){if(client){await client.leave();client.removeAllListeners();client=null}watching=false;$('video').textContent='远端画面会显示在这里';$('watch').textContent='加入观看';$('watchDot').className='dot';$('watchText').textContent='等待客户端开始共享'}
+  $('launch').onclick=()=>{const uri=launchUri();$('uri').textContent=uri;location.href=uri};
+  $('newSession').onclick=()=>create().catch(e=>alert(e.message));
+  $('stop').onclick=async()=>{if(!current)return;await api('/api/share/stop?t='+encodeURIComponent(current.token),{method:'POST'});await leave();await poll()};
+  $('watch').onclick=async()=>{try{if(watching){await leave();return}const state=await api('/test/session');if(state.status!=='active')throw Error('客户端还没有开始共享');const auth=await api('/api/share/token?t='+encodeURIComponent(current.token)+'&role=subscriber');client=AgoraRTC.createClient({mode:state.lowLatency?'rtc':'live',codec:'vp8'});if(!state.lowLatency)await client.setClientRole('audience');client.on('user-published',async(user,type)=>{await client.subscribe(user,type);if(type==='video'){ $('video').textContent='';const holder=document.createElement('div');$('video').append(holder);user.videoTrack.play(holder)}if(type==='audio')user.audioTrack.play()});client.on('user-unpublished',(user,type)=>{if(type==='video')$('video').textContent='远端视频已停止'});await client.join(auth.appId,auth.channel,auth.token,auth.uid);watching=true;$('watch').textContent='停止观看';$('watchDot').className='dot ok';$('watchText').textContent='已加入，等待远端轨道'}catch(e){await leave();$('watchDot').className='dot bad';$('watchText').textContent=e.message}}
+  create().catch(e=>{$('publishDot').className='dot bad';$('publishText').textContent=e.message});setInterval(poll,1000);addEventListener('beforeunload',()=>{if(client)client.leave()});
+</script></body></html>

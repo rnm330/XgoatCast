@@ -1,0 +1,4 @@
+out/
+native/*.exe
+native/*.pdb
+renderer/bundle.js

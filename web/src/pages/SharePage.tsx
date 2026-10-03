@@ -1,12 +1,14 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Loader2, Link2, CheckCircle2, Monitor, Zap, ZapOff, Clock } from 'lucide-react';
-import { api } from '../lib/api';
+import { AlertTriangle, Loader2, Link2, CheckCircle2, Monitor, MonitorUp, Zap, Clock, Mic, MicOff, Users } from 'lucide-react';
+import { api, ApiError } from '../lib/api';
 import { useSessionSSE } from '../hooks/useSessionSSE';
 import { useScreenShare, QUALITY_OPTIONS } from '../hooks/useScreenShare';
 import { copyToClipboard, cn } from '../lib/utils';
 import type { SessionInfo } from '../types';
 import { NoticeBanners } from '../components/notices/NoticeCenter';
+import { getClientEnvironment, markPageOpenOnce, sanitizeShareFailureReason } from '../lib/clientEnv';
+import { buildDesktopLaunch, CLIENT_RELEASE_PAGE } from '../lib/desktopLaunch';
 
 // ===== Cookie 工具 =====
 const CID_KEY = 'xgoatcast_cid';
@@ -35,7 +37,8 @@ function getActiveShare(): string | null {
 function setActiveShare(token: string): void {
   setCookie(ACTIVE_KEY, token, 1);
 }
-function clearActiveShare(): void {
+function clearActiveShare(expectedToken?: string): void {
+  if (expectedToken && getActiveShare() !== expectedToken) return;
   setCookie(ACTIVE_KEY, '', 0);
 }
 
@@ -47,17 +50,54 @@ export default function SharePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [lowLatency, setLowLatency] = useState(false);
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+  const [optimizationMode, setOptimizationMode] = useState<'detail' | 'motion'>('motion');
   const [qualityIdx, setQualityIdx] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [allowedQualities, setAllowedQualities] = useState<string[]>([]);
+  const [activeShareToken, setActiveShareToken] = useState(getActiveShare);
+  const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false);
   const [shareError, setShareError] = useState('');
+  const [desktopRequested, setDesktopRequested] = useState(() => sessionStorage.getItem('xgoatcast_desktop') === token);
+  const [desktopAttempt, setDesktopAttempt] = useState<{ id: string; token: string } | null>(null);
+  const [desktopResponse, setDesktopResponse] = useState<'waiting' | 'ready'>('waiting');
   const [idleCountdown, setIdleCountdown] = useState<number | null>(null);
   const [noViewerCountdown, setNoViewerCountdown] = useState<number | null>(null);
   const idleDeadlineRef = useRef<number | null>(null);
   const noViewerDeadlineRef = useRef<number | null>(null);
 
-  const socket = useSessionSSE(token, 'publisher');
+  // Cookies have no cross-tab change event. Refresh the guard when another tab stops.
+  useEffect(() => {
+    const refresh = () => setActiveShareToken(getActiveShare());
+    const timer = window.setInterval(refresh, 2_000);
+    window.addEventListener('focus', refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, []);
+
+  const socket = useSessionSSE(token, 'publisher', desktopRequested);
+  const desktopSharing = desktopRequested && socket.status === 'active' && socket.publisherClientId === clientId;
+  useEffect(() => {
+    if (!desktopRequested || !desktopAttempt || desktopAttempt.token !== token || desktopSharing || socket.ended) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const data = await api.getShareInfo(token);
+        if (disposed) return;
+        if (data.desktopLaunch?.id === desktopAttempt.id && data.desktopLaunch.clientId === clientId) {
+          setDesktopResponse('ready');
+          return;
+        }
+      } catch { /* The normal session stream owns authentication and network errors. */ }
+      if (disposed) return;
+      timer = setTimeout(poll, 1000);
+    };
+    void poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [desktopRequested, desktopAttempt, desktopSharing, socket.ended, token, clientId]);
   const screenShare = useScreenShare(token, () => {
+    setMicrophoneEnabled(false);
     socket.stopSharing();
   });
   const stopRef = useRef(screenShare.stop);
@@ -74,6 +114,14 @@ export default function SharePage() {
         // 恢复已持久化的低延迟模式
         if (data.lowLatency) setLowLatency(true);
         setLoading(false);
+        if (markPageOpenOnce(token, 'share')) {
+          void api.reportShareTelemetry({
+            token,
+            pageType: 'share',
+            eventType: 'page_open',
+            ...getClientEnvironment(),
+          }).catch(() => {});
+        }
 
         // 清理 stale active cookie：服务器重新部署后旧 session 已失效，
         // 但浏览器 Cookie 仍保存旧 token，会导致误报"请先停止其他共享"
@@ -81,9 +129,17 @@ export default function SharePage() {
         if (staleActive && staleActive !== token) {
           api.getShareInfo(staleActive)
             .then((staleInfo) => {
-              if (staleInfo.status === 'ended') clearActiveShare();
+              if (staleInfo.status === 'ended') {
+                clearActiveShare(staleActive);
+                setActiveShareToken(getActiveShare());
+              }
             })
-            .catch(() => { clearActiveShare(); });
+            .catch((error) => {
+              if (error instanceof ApiError && [401, 404].includes(error.statusCode)) {
+                clearActiveShare(staleActive);
+                setActiveShareToken(getActiveShare());
+              }
+            });
         }
       })
       .catch((e) => { setLoadError(e.message || '加载失败'); setLoading(false); });
@@ -136,6 +192,10 @@ export default function SharePage() {
   }, [socket.noViewerRemainingSec]);
 
   const handleStart = useCallback(async () => {
+    if (startingRef.current) return;
+    setDesktopRequested(false);
+    setDesktopAttempt(null);
+    sessionStorage.removeItem('xgoatcast_desktop');
     setShareError('');
     if (qualityIdx === null || !allowedQualities.includes(QUALITY_OPTIONS[qualityIdx]?.key)) {
       setShareError('该服务器暂未开放任何共享画质，请联系服务器管理员。');
@@ -147,27 +207,81 @@ export default function SharePage() {
       setShareError('您正在另一个会话中共享，请先停止那个共享再开始新的。');
       return;
     }
-    const result = await screenShare.publish({
-      qualityKey: QUALITY_OPTIONS[qualityIdx].key,
-      lowLatency,
-      bitrateConfig: info?.qualityBitrates?.[QUALITY_OPTIONS[qualityIdx].key],
-    });
-    if (result.success) {
-      const resp = await socket.startSharing(QUALITY_OPTIONS[qualityIdx].key, clientId, lowLatency);
-      if (resp.ok) {
-        setActiveShare(token);
+    startingRef.current = true;
+    setStarting(true);
+    try {
+      const result = await screenShare.publish({
+        qualityKey: QUALITY_OPTIONS[qualityIdx].key,
+        lowLatency,
+        microphoneEnabled: info?.platform === 'panel' && microphoneEnabled,
+        optimizationMode: info?.allowQualityPreference ? optimizationMode : 'motion',
+        bitrateConfig: info?.qualityBitrates?.[QUALITY_OPTIONS[qualityIdx].key],
+      });
+      if (result.success) {
+        const resp = await socket.startSharing(QUALITY_OPTIONS[qualityIdx].key, clientId, lowLatency);
+        if (resp.ok) {
+          setActiveShare(token);
+          setActiveShareToken(token);
+        } else {
+          screenShare.stop();
+          setMicrophoneEnabled(false);
+          setShareError(resp.message || '无法开始共享，可能已有其他人正在共享或链接已失效。');
+          void api.reportShareTelemetry({
+            token, pageType: 'share', eventType: 'start_failed',
+            failureReason: 'start_rejected', ...getClientEnvironment(),
+          }).catch(() => {});
+        }
       } else {
-        screenShare.stop();
-        setShareError('无法开始共享，可能已有其他人正在共享或链接已失效。');
+        void api.reportShareTelemetry({
+          token, pageType: 'share', eventType: 'start_failed',
+          failureReason: sanitizeShareFailureReason(result.message || screenShare.error),
+          ...getClientEnvironment(),
+        }).catch(() => {});
       }
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
     }
-  }, [screenShare, socket, qualityIdx, allowedQualities, token, clientId, lowLatency, info]);
+  }, [screenShare, socket, qualityIdx, allowedQualities, token, clientId, lowLatency, microphoneEnabled, optimizationMode, info]);
+
+  const handleMicrophoneToggle = async () => {
+    const next = !microphoneEnabled;
+    if (screenShare.isSharing) {
+      if (await screenShare.setMicrophoneEnabled(next)) setMicrophoneEnabled(next);
+    } else {
+      setMicrophoneEnabled(next);
+    }
+  };
+
+  const handleDesktopStart = () => {
+    if (allowedQualities.length === 0 || starting || screenShare.isSharing || desktopSharing) return;
+    const active = getActiveShare();
+    if (active && active !== token) { setShareError('请先停止其他共享。'); return; }
+    setShareError('');
+    setMicrophoneEnabled(false);
+    setDesktopRequested(true);
+    const launchId = crypto.randomUUID();
+    setDesktopAttempt({ id: launchId, token });
+    setDesktopResponse('waiting');
+    sessionStorage.setItem('xgoatcast_desktop', token);
+    // Keep this navigation synchronous with the user click for external-protocol activation.
+    window.location.href = buildDesktopLaunch({
+      server: window.location.origin, token, clientId, launchId,
+    });
+  };
+
+  useEffect(() => {
+    if (desktopSharing) { setActiveShare(token); setActiveShareToken(token); }
+    else if (desktopRequested && (socket.status === 'grace' || socket.ended)) { clearActiveShare(token); setActiveShareToken(getActiveShare()); }
+  }, [desktopSharing, desktopRequested, socket.status, socket.ended, token]);
 
   const handleStop = useCallback(async () => {
     await screenShare.stop();
+    setMicrophoneEnabled(false);
     socket.stopSharing();
-    clearActiveShare();
-  }, [screenShare, socket]);
+    clearActiveShare(token);
+    setActiveShareToken(getActiveShare());
+  }, [screenShare, socket, token]);
 
   useEffect(() => {
     const handler = () => { stopRef.current(); };
@@ -178,14 +292,16 @@ export default function SharePage() {
   useEffect(() => {
     if (socket.ended) {
       screenShare.stop();
-      clearActiveShare();
+      setMicrophoneEnabled(false);
+      clearActiveShare(token);
+      setActiveShareToken(getActiveShare());
     }
-  }, [socket.ended, screenShare]);
+  }, [socket.ended, screenShare, token]);
 
   // 判断当前用户的共享权限（使用 socket 实时状态，而非初始 API 加载的静态数据）
   const isPublisher = !socket.publisherClientId || socket.publisherClientId === clientId;
   const lockedByOther = !!socket.publisherClientId && socket.publisherClientId !== clientId;
-  const activeElsewhere = !!getActiveShare() && getActiveShare() !== token;
+  const activeElsewhere = !!activeShareToken && activeShareToken !== token;
 
   if (loading) {
     return (
@@ -209,114 +325,142 @@ export default function SharePage() {
 
   return (
     <div className="min-h-screen p-4 sm:p-6 lg:p-8">
-      <header className="flex items-center justify-between mb-8 max-w-3xl mx-auto">
+      <header className="flex items-center justify-between mb-7 max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-dark to-brand flex items-center justify-center text-xl">
-            🐑
-          </div>
-          <div>
-            <h1 className="font-bold text-lg leading-tight">Xgoat.Cast</h1>
-            <p className="text-xs text-muted">屏幕共享</p>
-          </div>
+          <div className="w-10 h-10 rounded-lg bg-brand flex items-center justify-center"><MonitorUp size={23} strokeWidth={1.7} /></div>
+          <h1 className="font-semibold text-lg leading-tight">Xgoat.Cast 屏幕共享</h1>
         </div>
         <div className="flex items-center gap-2 text-sm">
-          <span className={cn('w-2.5 h-2.5 rounded-full', socket.connected ? 'bg-green-400' : 'bg-yellow-400', 'animate-pulse')} />
+          <span className={cn('w-2.5 h-2.5 rounded-full', socket.connected ? 'bg-green-500' : 'bg-yellow-500')} />
           <span className="text-muted">{socket.connected ? '已连接' : '连接中'}</span>
         </div>
       </header>
 
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-7xl mx-auto">
         <NoticeBanners />
       </div>
 
-      <main className="max-w-3xl mx-auto space-y-5">
-        {/* 分享者信息 + 观看链接 */}
+      <main className="max-w-7xl mx-auto space-y-5">
+        {/* 共享人信息 + 观看链接 */}
         {info && (
-          <div className="glass rounded-2xl p-4 flex items-center justify-between flex-wrap gap-3">
-            <div>
-              <p className="text-sm text-muted">分享者</p>
-              <p className="font-semibold">{info.sharerUsername}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs text-dim bg-white/5 px-3 py-1.5 rounded-lg max-w-[240px] truncate">
+          <div className="glass rounded-xl px-4 sm:px-6 py-4 grid grid-cols-[minmax(0,1fr)_auto] sm:flex sm:items-center gap-4 sm:gap-6">
+            <div className="min-w-0"><p className="text-xs text-muted">共享人</p><p className="font-semibold truncate">{info.sharerUsername}</p></div>
+            <div className="col-span-2 row-start-2 sm:row-auto flex min-w-0 flex-1 w-full sm:w-auto items-center gap-2">
+              <code className="hidden sm:block text-xs text-dim bg-[#f3f4f0] px-3 py-2.5 rounded-lg min-w-0 flex-1 truncate">
                 {info.viewLink}
               </code>
               <button
                 onClick={() => { copyToClipboard(info.viewLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                className="btn-brand px-3 py-1.5 rounded-lg text-white text-sm flex items-center gap-1.5"
+                className="w-full justify-center sm:w-auto rounded-lg border border-[#cbd0c7] bg-[#fffefd] hover:bg-[#f3f4f0] px-3 py-2 text-sm flex shrink-0 items-center gap-1.5"
               >
                 {copied ? <CheckCircle2 className="w-4 h-4" /> : <Link2 className="w-4 h-4" />}
                 复制观看链接
               </button>
             </div>
+            <span className="col-start-2 row-start-1 sm:col-auto sm:row-auto inline-flex items-center gap-1.5 text-sm text-muted"><Users size={16} />{socket.viewerCount} 人观看</span>
           </div>
         )}
 
-        {/* 本地预览画面（不走声网，节省流量） */}
-        {screenShare.isSharing && (
-          <div className="relative w-full aspect-video rounded-2xl bg-black shadow-2xl overflow-hidden">
-            <div ref={screenShare.setLocalPreviewContainer} className="absolute inset-0 w-full h-full" />
+        <div className="grid lg:grid-cols-[minmax(0,1.55fr)_minmax(330px,.85fr)] gap-5 items-start">
+        <div>
+          <div className="relative w-full aspect-video rounded-xl bg-[#24292b] overflow-hidden flex items-center justify-center video-stage">
+            {screenShare.isSharing ? <div ref={screenShare.setLocalPreviewContainer} className="absolute inset-0 w-full h-full" /> : <div className="text-center px-4"><MonitorUp size={54} strokeWidth={1.2} className="mx-auto text-[#c9d1cd]" /><p className="mt-5 text-[#d9e0dc] text-sm">选择屏幕后将在这里预览</p></div>}
           </div>
-        )}
-
-        {/* 画质选择 + 大按钮 */}
-        <div className="glass-strong rounded-2xl p-6">
-          {screenShare.isSharing && (
-            <div className="flex items-center justify-center gap-2 mb-4 text-brand-light text-sm">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              正在共享 · {socket.viewerCount} 人观看
-              <span className={cn(
-                'text-xs px-2 py-0.5 rounded-full',
-                lowLatency ? 'bg-blue-500/20 text-blue-300' : 'bg-green-500/20 text-green-300',
-              )}>
-                {lowLatency ? '低延迟 400-800ms' : '极速直播 1500-2000ms'}
-              </span>
-            </div>
-          )}
-
-          {/* 画质选择按钮组 */}
-          <div className="mb-4">
-            <label className="text-xs text-muted mb-2 block text-center">选择画质</label>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-              {QUALITY_OPTIONS.map((q) => {
-                const idx = QUALITY_OPTIONS.indexOf(q);
-                const enabled = allowedQualities.includes(q.key);
-                const selected = qualityIdx !== null && idx === qualityIdx;
-                return (
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted"><span className="inline-flex items-center gap-2"><span className={cn('w-2 h-2 rounded-full', screenShare.isSharing || desktopSharing ? 'bg-green-500' : 'bg-[#a0a7a1]')} />{screenShare.isSharing || desktopSharing ? '正在共享屏幕' : '尚未开始共享'}</span><span>{socket.viewerCount} 人观看</span></div>
+        </div>
+        <div className="space-y-5">
+        {/* 共享设置 */}
+        <section aria-label="共享模式" className="glass rounded-xl p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <h2 className="text-lg font-semibold">共享设置</h2>
+          </div>
+          <div className="space-y-3">
+            <div className="rounded-md border border-[#d9ddd6] bg-[#f8f9f6] p-3">
+              <p className="mb-2 text-xs font-medium">画面偏好</p>
+              <div role="group" aria-label="画面偏好" aria-describedby="quality-preference-description" className="grid grid-cols-2 gap-1 rounded-md bg-[#e2e4df] p-1">
+                {([['detail', '画质优先'], ['motion', '帧率优先']] as const).map(([mode, label]) => (
                   <button
-                    key={q.key}
-                    disabled={!enabled || screenShare.isSharing || socket.ended || lockedByOther}
-                    onClick={() => { if (enabled) setQualityIdx(idx); }}
+                    key={mode}
+                    type="button"
+                    aria-pressed={optimizationMode === mode}
+                    title={mode === 'detail' ? '适合文字和细节' : '适合游戏和动态画面'}
+                    disabled={!info?.allowQualityPreference || starting || screenShare.isSharing || desktopSharing || socket.ended || lockedByOther}
+                    onClick={() => setOptimizationMode(mode)}
                     className={cn(
-                      'flex flex-col items-center gap-1 px-3 py-2 rounded-lg border cursor-pointer transition-all text-sm',
-                      selected
-                        ? 'border-brand bg-brand/20 text-white shadow-lg shadow-brand/30 ring-2 ring-brand/50'
-                        : enabled
-                          ? 'border-white/8 bg-white/[0.03] text-muted hover:border-white/15'
-                          : 'border-white/5 bg-white/[0.01] text-dim cursor-not-allowed',
-                      (screenShare.isSharing || socket.ended || lockedByOther) && 'opacity-40 cursor-not-allowed',
+                      'min-h-9 rounded-[3px] border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed',
+                      optimizationMode === mode
+                        ? 'border-[#b7beb4] bg-[#fffefd] font-medium text-[#242923] shadow-[0_1px_2px_rgba(40,48,38,.12)]'
+                        : 'border-transparent text-[#596057] hover:bg-[#d9ddd5] disabled:hover:bg-transparent',
                     )}
                   >
-                    <span className="font-medium">{q.label}</span>
-                    <span className="text-dim text-xs">{q.encoderConfig.width}×{q.encoderConfig.height}</span>
-                    {!enabled && <span className="text-xs text-dim">未开放</span>}
+                    {label}
                   </button>
-                );
-              })}
+                ))}
+              </div>
+              <p id="quality-preference-description" className="mt-2 text-[11px] leading-relaxed text-muted">{info?.allowQualityPreference ? '画质优先适合文字与细节；帧率优先适合游戏和动态画面。' : '服务器固定为帧率优先。'}</p>
             </div>
+            {info?.allowLowLatency && <div className="rounded-xl border border-white/10 bg-white/[0.025] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-medium">
+                  <Zap className="h-3.5 w-3.5 text-blue-300" />
+                  <span id="low-latency-label">超低延迟模式</span>
+                  <span className="text-[10px] text-muted">{lowLatency ? '已开启' : '已关闭'}</span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={lowLatency}
+                  aria-labelledby="low-latency-label"
+                  aria-describedby="low-latency-description"
+                  disabled={starting || screenShare.isSharing || desktopSharing || socket.ended || lockedByOther || (socket.status === 'grace' && isPublisher)}
+                  onClick={() => setLowLatency((value) => !value)}
+                  className={cn('flex h-8 w-11 shrink-0 items-center rounded-full px-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 disabled:cursor-not-allowed disabled:opacity-50', lowLatency ? 'bg-blue-500' : 'bg-white/[0.15]')}
+                >
+                  <span className={cn('h-5 w-5 rounded-full bg-white shadow-sm transition-transform', lowLatency ? 'translate-x-4' : 'translate-x-0')} />
+                </button>
+              </div>
+              <p id="low-latency-description" className="mt-2 text-[11px] leading-relaxed text-muted">开启：减少观看延迟至最低160ms，适合超低延迟要求，但是时长用量将会提升约100%</p>
+            </div>}
           </div>
-          {allowedQualities.length === 0 && (
-            <p className="text-sm text-yellow-300 text-center mb-4">
-              该服务器暂未开放任何共享画质，请联系服务器管理员。
-            </p>
+          {info?.platform === 'panel' && (
+            <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.025] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-medium">
+                  {microphoneEnabled ? <Mic className="h-4 w-4 text-brand-light" /> : <MicOff className="h-4 w-4 text-muted" />}
+                  <span id="microphone-label">麦克风</span>
+                  <span className="text-[10px] text-muted">{microphoneEnabled ? '已开启' : '已关闭'}</span>
+                </div>
+                <button type="button" role="switch" aria-checked={microphoneEnabled} aria-labelledby="microphone-label" aria-describedby="microphone-description"
+                  disabled={starting || screenShare.microphoneBusy || desktopSharing || socket.ended || lockedByOther || activeElsewhere}
+                  onClick={() => void handleMicrophoneToggle()}
+                  className={cn('flex h-8 w-11 shrink-0 items-center rounded-full px-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50', microphoneEnabled ? 'bg-brand' : 'bg-white/[0.15]')}>
+                  <span className={cn('h-5 w-5 rounded-full bg-white shadow-sm transition-transform', microphoneEnabled ? 'translate-x-4' : 'translate-x-0')} />
+                </button>
+              </div>
+              <p id="microphone-description" className="mt-2 text-[11px] leading-relaxed text-muted">默认关闭。开启后，浏览器共享时会将麦克风声音与屏幕音频一起传给观众；共享过程中也可切换。</p>
+            </div>
           )}
+          <fieldset className="mt-3 border-t border-[#e1e4dd] pt-4" disabled={starting || screenShare.isSharing || desktopSharing || socket.ended || lockedByOther}>
+            <legend className="sr-only">浏览器共享画质</legend>
+            <label htmlFor="share-quality" className="mb-2.5 flex items-center gap-2 text-sm font-medium">
+              浏览器共享画质 <span className="text-xs text-muted font-light">{allowedQualities.length} 档可选</span>
+            </label>
+            <select id="share-quality" className="w-full rounded-md border border-[#cbd0c7] bg-[#fffefd] px-3.5 py-3 text-sm disabled:opacity-60" value={qualityIdx ?? ''} onChange={e => setQualityIdx(e.target.value ? Number(e.target.value) : null)}>
+              {qualityIdx === null && <option value="">暂无可用画质</option>}
+              {QUALITY_OPTIONS.filter(q => allowedQualities.includes(q.key)).map(q => <option key={q.key} value={QUALITY_OPTIONS.indexOf(q)}>{q.label} · {q.encoderConfig.width}×{q.encoderConfig.height}</option>)}
+            </select>
+            {allowedQualities.length === 0 && <p className="mt-2 text-xs text-muted">该服务器暂未开放共享画质，请联系服务器管理员。</p>}
+          </fieldset>
+        </section>
 
+        {/* 共享操作 */}
+        <div className="space-y-3">
           {/* ===== 大按钮区域 ===== */}
-          {screenShare.isSharing ? (
+          {screenShare.isSharing || desktopSharing ? (
             /* 正在共享 - 红色停止按钮 */
             <button
               onClick={handleStop}
-              className="w-full py-5 rounded-2xl bg-red-500/90 hover:bg-red-500 text-white font-semibold text-lg flex items-center justify-center transition-colors"
+              className="stop-share-button w-full py-4 rounded-lg bg-[#a0342d] hover:bg-[#8b2b25] text-white font-semibold text-lg flex items-center justify-center transition-colors"
             >
               停止共享
             </button>
@@ -324,7 +468,7 @@ export default function SharePage() {
             /* 链接已失效 - 灰色大按钮 */
             <button
               disabled
-              className="w-full py-5 rounded-2xl bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
+              className="w-full py-5 rounded-md bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
             >
               <AlertTriangle className="w-6 h-6" />
               链接已失效
@@ -333,7 +477,7 @@ export default function SharePage() {
             /* 已有其他人正在共享 - 灰色按钮 */
             <button
               disabled
-              className="w-full py-5 rounded-2xl bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
+              className="w-full py-5 rounded-md bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
             >
               <Monitor className="w-6 h-6" />
               已有其他人正在共享
@@ -342,7 +486,7 @@ export default function SharePage() {
             /* GRACE 状态 - 非共享者 - 等待恢复 */
             <button
               disabled
-              className="w-full py-5 rounded-2xl bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
+              className="w-full py-5 rounded-md bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
             >
               <Clock className="w-6 h-6" />
               等待共享者恢复…
@@ -351,10 +495,9 @@ export default function SharePage() {
             /* GRACE 状态 - 共享者 - 可恢复，显示倒计时 */
             <button
               onClick={handleStart}
-              disabled={qualityIdx === null}
+              disabled={qualityIdx === null || starting}
               className={cn(
-                'w-full py-5 rounded-2xl text-white font-semibold text-lg flex items-center justify-center gap-3 transition-all',
-                'bg-gradient-to-r from-brand-dark to-brand hover:scale-[1.01] disabled:opacity-40 disabled:cursor-not-allowed',
+                'btn-brand w-full py-4 rounded-lg font-semibold text-lg flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed',
               )}
             >
               <Monitor className="w-6 h-6" />
@@ -367,7 +510,7 @@ export default function SharePage() {
             /* 正在其他 session 共享 */
             <button
               disabled
-              className="w-full py-5 rounded-2xl bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
+              className="w-full py-5 rounded-md bg-white/5 border border-white/10 text-dim font-semibold text-lg flex items-center justify-center gap-3 cursor-not-allowed"
             >
               <Monitor className="w-6 h-6" />
               请先停止其他共享
@@ -376,69 +519,41 @@ export default function SharePage() {
             /* 正常可用 - 选择共享窗口 */
             <button
               onClick={handleStart}
+              disabled={starting || qualityIdx === null}
               className={cn(
-                'btn-brand w-full py-5 rounded-2xl text-white font-semibold text-lg',
+                'btn-brand w-full py-4 rounded-lg font-semibold text-lg',
                 'flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed',
-                'transition-all hover:scale-[1.01]',
+                'transition-colors',
               )}
             >
               <Monitor className="w-6 h-6" />
-              选择共享窗口
+              {starting ? '正在启动共享…' : '选择共享窗口'}
               {socket.status === 'pending' && idleCountdown != null && idleCountdown > 0 && (
                 <span className="text-sm opacity-80">（剩余 {idleCountdown}s）</span>
               )}
             </button>
           )}
 
-          {/* 按钮下方提示 */}
           {!screenShare.isSharing && !socket.ended && !lockedByOther && !activeElsewhere && (
-            <p className="text-xs text-dim text-center mt-3">
-              {socket.status === 'grace' && isPublisher
-                ? '点击按钮恢复共享，超时未共享屏幕链接将失效'
-                : socket.status === 'pending'
-                  ? '点击后浏览器会弹窗选择要共享的屏幕或窗口，超时未开始共享链接将失效'
-                  : '点击后浏览器会弹窗选择要共享的屏幕或窗口'}
-            </p>
+            <div className="mt-3 space-y-2">
+              <button onClick={handleDesktopStart} disabled={starting || allowedQualities.length === 0 || desktopSharing}
+                className="w-full py-3 rounded-lg border border-[#cbd0c7] bg-[#fffefd] text-sm font-medium disabled:opacity-40 hover:bg-[#f3f4f0]">
+                {desktopSharing ? `Windows 客户端正在共享 · ${socket.viewerCount} 人观看` : '使用 Windows 客户端共享'}
+              </button>
+              <div className="text-sm text-center">
+                <a href={CLIENT_RELEASE_PAGE} target="_blank" rel="noopener noreferrer" className="inline-flex py-2 text-[#a94004] underline underline-offset-4">下载共享客户端</a>
+              </div>
+              {desktopRequested && !desktopSharing && desktopResponse === 'ready' && <p role="status" className="text-sm text-muted text-center">客户端已响应，请在客户端选择窗口或屏幕开始共享。</p>}
+              {desktopSharing && <p className="text-xs text-muted text-center">关闭此网页不会停止客户端共享，可在此处或系统托盘停止。</p>}
+            </div>
           )}
+
+        </div>
+        </div>
         </div>
 
-        {/* 低延迟模式开关（仅服务器允许时显示） */}
-        {info?.allowLowLatency && (
-          <div className="flex gap-3">
-            <button
-              onClick={() => setLowLatency((v) => !v)}
-              disabled={screenShare.isSharing || socket.ended || lockedByOther || (socket.status === 'grace' && isPublisher)}
-              className={cn(
-                'flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border transition-all',
-                lowLatency
-                  ? 'border-blue-400 bg-blue-500/20 text-white shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/50'
-                  : 'border-white/8 bg-white/[0.03] text-muted hover:border-white/15',
-                (screenShare.isSharing || socket.ended || lockedByOther || (socket.status === 'grace' && isPublisher)) && 'opacity-40 cursor-not-allowed',
-              )}
-            >
-              {lowLatency ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
-              <span className="text-sm font-medium">低延迟模式</span>
-              <span className={cn(
-                'text-xs px-1.5 py-0.5 rounded-full',
-                lowLatency ? 'bg-blue-500/20 text-blue-300' : 'bg-white/5 text-dim',
-              )}>
-                {lowLatency ? '开' : '关'}
-              </span>
-            </button>
-          </div>
-        )}
-
-        {/* 低延迟模式说明 */}
-        {info?.allowLowLatency && !screenShare.isSharing && (
-          <p className="text-xs text-dim text-center">
-            {lowLatency
-              ? '⚡ 低延迟模式：延迟降低约 60-70%（400-800ms），费用上涨约 100%'
-              : '当前为极速直播（延迟 1500-2000ms），费用较低'}
-          </p>
-        )}
-
         {/* 无人观看自动结束提示 */}
-        {screenShare.isSharing && noViewerCountdown != null && noViewerCountdown > 0 && (
+        {(screenShare.isSharing || desktopSharing) && noViewerCountdown != null && noViewerCountdown > 0 && (
           <div className="glass rounded-xl p-4 border border-yellow-400/40 flex items-center gap-3">
             <AlertTriangle className="w-5 h-5 text-yellow-400 shrink-0" />
             <div>

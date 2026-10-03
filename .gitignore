@@ -3,6 +3,10 @@ node_modules
 
 # Environment secrets
 .env
+.env.native-test
+.env.lanzou
+.env.release
+.release-state/
 
 # Database files (contains sensitive credentials)
 data/*.db
@@ -25,3 +29,6 @@ plans/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local UI review screenshots
+.impeccable/review/

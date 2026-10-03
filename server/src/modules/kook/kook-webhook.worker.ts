@@ -83,7 +83,7 @@ export class KookWebhookWorker implements OnModuleInit, OnModuleDestroy {
         return;
       }
       effectStarted = true;
-      const handled = await this.router.route(envelope);
+      const handled = await this.router.route(envelope, event.receivedAt);
       this.repository.completeBusinessEffect(event.eventKey, !handled);
       this.logger.log(
         `KOOK webhook processed: key=${event.eventKey} type=${event.eventType} result=${handled ? 'done' : 'ignored'}`,

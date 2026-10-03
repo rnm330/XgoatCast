@@ -2,6 +2,9 @@ node_modules
 **/node_modules
 build
 .env
+.env.lanzou
+.env.release
+.release-state
 data
 *.log
 .git

@@ -19,7 +19,7 @@ export function buildShareLinkCard(opts: {
           type: 'section',
           text: {
             type: 'kmarkdown',
-            content: '**Xgoat.Cast 小羊屏幕共享已创建** 🐑\n' + safeName + '，点击下方按钮开始共享你的屏幕。',
+            content: '**Xgoat.Cast 屏幕共享已创建** 🐑\n' + safeName + '，点击下方按钮开始共享你的屏幕。',
           },
         },
         {
@@ -199,7 +199,7 @@ export function buildHelpCard(opts?: { triggerWords?: string; showShareButton?: 
   ];
 }
 
-/** 绑定管理面板卡片（发送给频道主） */
+/** 绑定管理面板卡片（发送给邀请机器人加入的人和服务器主） */
 export function buildBindCard(opts: {
   guildName: string;
   openId?: string;
@@ -224,7 +224,7 @@ export function buildBindCard(opts: {
           type: 'section',
           text: {
             type: 'kmarkdown',
-            content: '作为频道主，您需要绑定管理面板来配置屏幕共享设置（画质选项、声网凭证等）。\n\n请点击下方按钮前往绑定页面，设置管理密码后即可使用。',
+            content: '如果您是本次机器人邀请人或服务器主，可以绑定管理面板来配置屏幕共享设置（画质选项、声网凭证等）。\n\n请点击下方按钮前往绑定页面，设置管理密码后即可使用。',
           },
         },
         { type: 'divider' },
@@ -335,4 +335,3 @@ export function buildBindRequestCard(opts: {
     },
   ];
 }
-

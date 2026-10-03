@@ -5,20 +5,20 @@ export default {
     extend: {
       colors: {
         brand: {
-          DEFAULT: '#FF8C42',
-          light: '#FFA559',
-          dark: '#FF6B35',
+          DEFAULT: '#FF6014',
+          light: '#A94004',
+          dark: '#E6510C',
         },
         surface: {
-          DEFAULT: '#16172B',
-          light: '#1A1B2E',
-          dark: '#0F1020',
+          DEFAULT: '#F2F2F0',
+          light: '#FFFEFC',
+          dark: '#E9ECE7',
         },
-        muted: '#A0A3B8',
-        dim: '#6B7280',
+        muted: '#5B5E59',
+        dim: '#676A64',
       },
       fontFamily: {
-        sans: ['Poppins', 'system-ui', 'sans-serif'],
+        sans: ['"Microsoft YaHei UI"', '"Segoe UI"', '"Noto Sans CJK SC"', 'system-ui', 'sans-serif'],
       },
       backdropBlur: {
         xs: '2px',

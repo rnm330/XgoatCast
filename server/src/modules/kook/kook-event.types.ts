@@ -1,4 +1,6 @@
 export interface KookMessageEvent {
+  /** Server-recorded inbox arrival time, not the queued event's processing time. */
+  receivedAt?: number;
   id?: string;
   msg_id?: string;
   type?: number;
@@ -17,6 +19,7 @@ export interface KookMessageEvent {
 }
 
 export interface KookButtonClickEvent {
+  receivedAt?: number;
   msgId: string;
   userId: string;
   username: string;
@@ -32,6 +35,7 @@ export interface KookWebhookEnvelope {
 }
 
 export interface KookQueuedEvent {
+  receivedAt?: number;
   eventKey: string;
   sn: number | null;
   eventType: string;

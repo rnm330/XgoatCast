@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, Loader2 } from 'lucide-react';
+import { ArrowRight, Loader2, MonitorUp } from 'lucide-react';
 import { useLocation, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 
@@ -44,9 +44,7 @@ export default function LegacyAdminMigrationPage() {
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="glass-strong rounded-3xl border border-white/15 p-8 sm:p-10 max-w-xl text-center shadow-2xl">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-dark to-brand flex items-center justify-center text-3xl mx-auto mb-5">
-          🐑
-        </div>
+        <div className="w-16 h-16 rounded-2xl bg-brand flex items-center justify-center mx-auto mb-5"><MonitorUp size={32} strokeWidth={1.7} /></div>
         <h1 className="text-2xl font-bold">KOOK 管理后台地址已迁移</h1>
         <p className="text-sm text-muted leading-relaxed mt-4">
           因系统扩展多平台支持，您的 KOOK 服务器管理后台已迁移至新的平台专属地址。

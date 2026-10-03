@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "product": "XgoatCast",
+  "channel": "beta",
+  "version": "0.0.1-beta.1",
+  "publishedAt": "2026-10-04",
+  "downloadUrl": "https://cn-nb2.rains3.com/xgoat/downloads/windows/official/0.0.1-beta.1/XgoatCast-0.0.1-beta.1-win-x64-setup.exe",
+  "releasePageUrl": "https://cast.xgoat.top/downloads.html",
+  "sha256": "8fcb18c6d035823ddce1e5e4bab5f96f93c2d63aedccd902e38f2e4a0ff47076",
+  "notes": "首个 Windows 客户端 Beta 版本。\n\n- 从共享网页一键打开客户端，共享窗口或整个屏幕。\n- 自由选择画质、程序声音和麦克风，并实时预览共享画面。\n- 关闭窗口后继续在托盘共享；可随时调整声音或停止共享。\n- 在「关于」查看版本、访问官网和检查更新；发现新版本时提示「立即更新」。\n- 分享页直接提供「下载共享客户端」入口，首次使用即可下载安装。",
+  "provider": "rainyun",
+  "fileName": "XgoatCast-0.0.1-beta.1-win-x64-setup.exe",
+  "bytes": 19677245,
+  "packageType": "installer"
+}

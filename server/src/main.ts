@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import { resolve } from 'path';
 // Load .env from project root (two levels up from server/src)
-config({ path: resolve(__dirname, '..', '..', '.env') });
+config({ path: process.env.XGOAT_ENV_FILE || resolve(__dirname, '..', '..', '.env') });
 
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
@@ -55,6 +55,8 @@ async function bootstrap() {
     bodyParser: false,
   });
   const db = app.get(DatabaseService);
+  // Configure only trusted reverse-proxy addresses; never trust arbitrary forwarded IPs.
+  if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY.split(',').map(value => value.trim()));
 
   // Security headers
   app.use(helmet({
@@ -69,6 +71,7 @@ async function bootstrap() {
   );
 
   // 解析 application/x-www-form-urlencoded（用于重新发起共享确认表单）
+  app.use('/api/integrations/qq/webhook', bodyParser.raw({ type: () => true, limit: '1mb', inflate: false }));
   app.use(bodyParser.urlencoded({ extended: false, limit: '1mb' }));
   // 显式限制 JSON 请求体大小
   app.use(bodyParser.json({ limit: '1mb' }));
@@ -87,7 +90,9 @@ async function bootstrap() {
     const path = req.path;
     const isLoginOrBind =
       path === '/api/super/login' ||
-      /\/(login|bind)$/.test(path);
+      /\/(login|bind)$/.test(path) ||
+      /^\/api\/spaces\/heychat\/[^/]+\/binding\/[^/]+\/claim$/.test(path) ||
+      /^\/api\/spaces\/qq\/[^/]+\/binding\/[^/]+\/claim$/.test(path);
 
     if (isLoginOrBind && req.method === 'POST') {
       const ip = req.ip || req.connection?.remoteAddress || 'unknown';
@@ -103,6 +108,7 @@ async function bootstrap() {
   // Public exceptions: login/status/bind for a specific platform space.
   app.use((req: any, res: any, next: any) => {
     const path = req.path;
+    if (path.startsWith('/api/panels/') || path.startsWith('/api/share/')) res.setHeader('Cache-Control', 'no-store');
 
     let needsAuth = false;
     if (path.startsWith('/api/super')) {
@@ -112,7 +118,10 @@ async function bootstrap() {
       needsAuth = !/\/(login|status|bind)$/.test(path);
     }
     if (path.startsWith('/api/spaces')) {
-      needsAuth = !/\/(login|status|bind)$/.test(path);
+      const publicDeviceBinding =
+        /^\/api\/spaces\/heychat\/[^/]+\/binding\/[^/]+\/(status|claim|poll|bind)$/.test(path) ||
+        /^\/api\/spaces\/qq\/[^/]+\/binding\/[^/]+\/(status|claim|poll|bind)$/.test(path);
+      needsAuth = !publicDeviceBinding && !/\/(login|status|bind)$/.test(path);
     }
 
     if (!needsAuth) return next();
@@ -151,6 +160,9 @@ async function bootstrap() {
       const server = db.getSpace(payload.platform, payload.externalId);
       if (!server || server.serverId !== payload.spaceId) {
         return res.status(401).json({ message: '平台空间不存在' });
+      }
+      if (server.status !== 'active' || !server.bound) {
+        return res.status(401).json({ message: '平台空间当前不可管理' });
       }
       hmacKey = server.serverSecret || SUPER_SECRET;
     } else {
@@ -205,6 +217,10 @@ async function bootstrap() {
 
   // 生产环境静态托管前端构建产物
   const webDist = join(__dirname, '..', '..', 'web', 'dist');
+  app.use('/downloads/windows/latest.json', (_req: any, res: any, next: any) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   app.useStaticAssets(webDist, {
     index: false,
   });
@@ -222,7 +238,7 @@ async function bootstrap() {
   });
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3520;
-  await app.listen(port);
+  await app.listen(port, process.env.HOST || '0.0.0.0');
   console.log(`xgoatcast server running on http://localhost:${port}`);
 }
 

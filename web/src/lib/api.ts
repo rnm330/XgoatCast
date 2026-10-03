@@ -2,9 +2,22 @@ import type {
   SessionInfo,
   AgoraTokenResponse,
 } from '../types';
+import type {
+  AnalyticsOverview,
+  AnalyticsRangeQuery,
+  AnalyticsRealtime,
+  AnalyticsRecordQuery,
+  AnalyticsRecords,
+  ClientEnvironment,
+  ClientStatsResponse,
+  ServerAnalyticsRecord,
+  ServerStateAnalyticsRecord,
+  ShareAnalyticsRecord,
+  ShareTelemetryPayload,
+} from '../types/analytics';
 
 const SUPER_TOKEN_KEY = 'xgoat_super_token';
-export type Platform = 'kook' | 'qq' | 'discord';
+export type Platform = 'kook' | 'heychat' | 'qq' | 'discord';
 
 export function getSuperAdminToken(): string | null {
   return localStorage.getItem(SUPER_TOKEN_KEY);
@@ -83,7 +96,7 @@ async function request<T>(
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
   };
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(url, { ...options, headers, credentials: 'include' });
   if (!res.ok) {
     let serverMsg = '';
     let statusCode = res.status;
@@ -142,7 +155,7 @@ async function serverRequest<T>(
   if (token) {
     headers['Authorization'] = 'Bearer ' + token;
   }
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(url, { ...options, headers, credentials: 'include' });
   if (!res.ok) {
     let serverMsg = '';
     try {
@@ -168,7 +181,7 @@ async function spaceRequest<T>(
   };
   const token = getSpaceAdminToken(platform, externalId);
   if (token) headers.Authorization = 'Bearer ' + token;
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(url, { ...options, headers, credentials: 'include' });
   if (!res.ok) {
     let serverMsg = '';
     try {
@@ -184,6 +197,15 @@ async function spaceRequest<T>(
 
 function spaceApiBase(platform: Platform, externalId: string): string {
   return `/api/spaces/${encodeURIComponent(platform)}/${encodeURIComponent(externalId)}`;
+}
+
+function analyticsRangeParams(query: AnalyticsRangeQuery): URLSearchParams {
+  const params = new URLSearchParams({ range: query.range });
+  if (query.range === 'custom') {
+    if (query.from !== undefined) params.set('from', String(query.from));
+    if (query.to !== undefined) params.set('to', String(query.to));
+  }
+  return params;
 }
 
 export const api = {
@@ -221,6 +243,13 @@ export const api = {
     });
   },
 
+  reportShareTelemetry(payload: ShareTelemetryPayload): Promise<{ ok: boolean }> {
+    return request('/api/share/telemetry', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   getNotices(page: 'server_admin' | 'share' | 'view'): Promise<any[]> {
     return request('/api/notices?page=' + encodeURIComponent(page));
   },
@@ -242,6 +271,18 @@ export const api = {
     return superRequest('/api/super/config', {
       method: 'PUT',
       body: JSON.stringify(config),
+    });
+  },
+  getHeychatStatus(): Promise<any> {
+    return superRequest('/api/super/heychat/status');
+  },
+  getQqStatus(): Promise<any> { return superRequest('/api/super/qq/status'); },
+  verifyQq(): Promise<any> { return superRequest('/api/super/qq/verify', { method: 'POST', body: '{}' }); },
+  syncQqPanel(): Promise<any> { return superRequest('/api/super/qq/panel', { method: 'POST', body: '{}' }); },
+  syncHeychat(): Promise<any> {
+    return superRequest('/api/super/heychat/sync', {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   },
   getSuperServers(): Promise<any[]> {
@@ -325,6 +366,30 @@ export const api = {
     return superRequest('/api/super/sessions');
   },
 
+  getAnalyticsRealtime(): Promise<AnalyticsRealtime> {
+    return superRequest('/api/super/analytics/realtime');
+  },
+  getAnalyticsOverview(query: AnalyticsRangeQuery): Promise<AnalyticsOverview> {
+    const params = analyticsRangeParams(query);
+    return superRequest('/api/super/analytics/overview?' + params.toString());
+  },
+  getAnalyticsRecords<T extends ShareAnalyticsRecord | ServerAnalyticsRecord | ServerStateAnalyticsRecord>(
+    query: AnalyticsRecordQuery,
+  ): Promise<AnalyticsRecords<T>> {
+    const params = analyticsRangeParams(query);
+    params.set('type', query.type);
+    params.set('page', String(query.page));
+    params.set('pageSize', String(query.pageSize));
+    if (query.status) params.set('status', query.status);
+    if (query.server) params.set('server', query.server);
+    if (query.platform) params.set('platform', query.platform);
+    return superRequest('/api/super/analytics/records?' + params.toString());
+  },
+  getAnalyticsClientStats(query: AnalyticsRangeQuery): Promise<ClientStatsResponse> {
+    const params = analyticsRangeParams(query);
+    return superRequest('/api/super/analytics/client-stats?' + params.toString());
+  },
+
   // ===== Server Admin API =====
   getServerStatus(serverId: string, token?: string): Promise<{ exists: boolean; bound?: boolean; guildName?: string; tokenValid?: boolean }> {
     const qs = token ? `?token=${encodeURIComponent(token)}` : '';
@@ -375,6 +440,41 @@ export const api = {
       body: JSON.stringify({ password, token }),
     });
   },
+  getHeychatBindingIntentStatus(
+    externalId: string,
+    intentId: string,
+    platform: 'heychat' | 'qq' = 'heychat',
+  ): Promise<{ ok: boolean; state: string; expiresAt?: number; roomName?: string }> {
+    return request(`/api/spaces/${platform}/${encodeURIComponent(externalId)}/binding/${encodeURIComponent(intentId)}/status`);
+  },
+  claimHeychatBinding(
+    externalId: string,
+    intentId: string,
+    platform: 'heychat' | 'qq' = 'heychat',
+  ): Promise<{ ok: boolean; state: string; code?: string; expiresAt?: number }> {
+    return request(`/api/spaces/${platform}/${encodeURIComponent(externalId)}/binding/${encodeURIComponent(intentId)}/claim`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+  pollHeychatBinding(
+    externalId: string,
+    intentId: string,
+    platform: 'heychat' | 'qq' = 'heychat',
+  ): Promise<{ ok: boolean; state: string; expiresAt?: number }> {
+    return request(`/api/spaces/${platform}/${encodeURIComponent(externalId)}/binding/${encodeURIComponent(intentId)}/poll`);
+  },
+  bindHeychatBinding(
+    externalId: string,
+    intentId: string,
+    password: string,
+    platform: 'heychat' | 'qq' = 'heychat',
+  ): Promise<{ ok: boolean; message?: string }> {
+    return request(`/api/spaces/${platform}/${encodeURIComponent(externalId)}/binding/${encodeURIComponent(intentId)}/bind`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+  },
   spaceAdminLogin(
     platform: Platform,
     externalId: string,
@@ -396,5 +496,16 @@ export const api = {
   },
   getSpaceSessions(platform: Platform, externalId: string): Promise<any[]> {
     return spaceRequest(platform, externalId, spaceApiBase(platform, externalId) + '/sessions');
+  },
+  heartbeatSpacePresence(
+    platform: Platform,
+    externalId: string,
+    browserSessionId: string,
+    environment: ClientEnvironment,
+  ): Promise<{ ok: boolean }> {
+    return spaceRequest(platform, externalId, spaceApiBase(platform, externalId) + '/presence', {
+      method: 'POST',
+      body: JSON.stringify({ browserSessionId, ...environment }),
+    });
   },
 };

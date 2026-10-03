@@ -1,19 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { EventEmitter } from 'events';
+import { PlatformSessionContext } from '../platform/platform.types';
 
-export interface SessionStartedEvent {
+export interface SessionStartedEvent extends PlatformSessionContext {
   sessionId: string;
   token: string;
   sharerUsername: string;
-  targetChannelId: string;
-  guildId: string;
 }
 
-export interface SessionEndedEvent {
+export interface SessionEndedEvent extends PlatformSessionContext {
   sessionId: string;
   reason: string;
-  targetChannelId?: string;
-  cardMessageId?: string;
+  platformMessageId?: string;
 }
 
 export interface SessionStateChangedEvent {
@@ -36,15 +34,18 @@ export class EventBusService extends EventEmitter {
     this.emit('session.state_changed', event);
   }
 
-  onSessionStarted(handler: (event: SessionStartedEvent) => void) {
+  onSessionStarted(handler: (event: SessionStartedEvent) => void): () => void {
     this.on('session.started', handler);
+    return () => this.off('session.started', handler);
   }
 
-  onSessionEnded(handler: (event: SessionEndedEvent) => void) {
+  onSessionEnded(handler: (event: SessionEndedEvent) => void): () => void {
     this.on('session.ended', handler);
+    return () => this.off('session.ended', handler);
   }
 
-  onSessionStateChanged(handler: (event: SessionStateChangedEvent) => void) {
+  onSessionStateChanged(handler: (event: SessionStateChangedEvent) => void): () => void {
     this.on('session.state_changed', handler);
+    return () => this.off('session.state_changed', handler);
   }
 }
